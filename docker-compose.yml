@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  app:
+    container_name: lawrose-api
+    build: .
+    ports:
+      - "8000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - elasticsearch  # Remove redis since using external
+    volumes:
+      - ./src:/app/src
+      - ./prisma:/app/prisma
+      - /app/node_modules
+    networks:
+      - ecommerce-network
+    restart: unless-stopped
+
+  # Remove redis since using external Redis Cloud
+  
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - ecommerce-network
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.8.0
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - ecommerce-network
+    restart: unless-stopped
+
+volumes:
+  elasticsearch_data:
+
+networks:
+  ecommerce-network:
+    driver: bridge
