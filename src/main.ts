@@ -36,8 +36,8 @@ async function bootstrap() {
     // Swagger documentation setup
     if (config.swagger.enabled) {
       const swaggerConfig = new DocumentBuilder()
-        .setTitle('API Documentation')
-        .setDescription('API documentation for the application')
+        .setTitle('Lawrose API Documentation')
+        .setDescription('API documentation for lawroseapplication')
         .setVersion('1.0')
         .addBearerAuth()
         .build();
