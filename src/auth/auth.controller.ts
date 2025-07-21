@@ -11,7 +11,7 @@ import {
   Query,
   Delete,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local.guard';
@@ -22,6 +22,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
+import { LoginDto } from './dto/login.dto';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -70,6 +71,7 @@ export class AuthController {
   @UseGuards(LocalAuthGuard)
   @Throttle(10, 60000) // 10 requests per minute
   @ApiOperation({ summary: 'User login' })
+  @ApiBody({ type: LoginDto }) // Add this to specify the request body
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Login successful',
@@ -85,8 +87,8 @@ export class AuthController {
             role: 'CUSTOMER',
             emailVerified: true
           },
-          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
-          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+        refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
         }
       }
     }
@@ -102,7 +104,11 @@ export class AuthController {
       }
     }
   })
-  async login(@Request() req) {
+  async login(
+    @Body() loginDto: LoginDto, // Add this to validate the request body
+    @Request() req
+  ) {
+    // The LocalAuthGuard will validate credentials and attach user to req.user
     return this.authService.login(req.user);
   }
 
