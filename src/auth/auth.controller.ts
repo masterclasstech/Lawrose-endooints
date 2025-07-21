@@ -9,6 +9,7 @@ import {
   HttpStatus,
   Get,
   Query,
+  Delete,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -16,11 +17,11 @@ import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local.guard';
 import { JwtAuthGuard } from './guards/jwt.guard';
 import { RegisterDto } from './dto/register.dto';
-//import { LoginDto } from './dto/login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ResendVerificationDto } from './dto/resend-verification.dto';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -110,11 +111,22 @@ export class AuthController {
   @ApiOperation({ summary: 'Verify user email' })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: 'Email verified successfully',
+    description: 'Email verified successfully and user logged in',
     schema: {
       example: {
         success: true,
-        message: 'Email verified successfully. You can now login to your account.'
+        message: 'Email verified successfully. You are now logged in.',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'john.doe@example.com',
+            fullName: 'John Doe',
+            role: 'CUSTOMER',
+            emailVerified: true
+          },
+          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        }
       }
     }
   })
@@ -135,9 +147,57 @@ export class AuthController {
 
   @Get('verify-email')
   @ApiOperation({ summary: 'Verify email via GET request (for email links)' })
-  @ApiResponse({ status: HttpStatus.OK, description: 'Email verified successfully' })
+  @ApiResponse({ 
+    status: HttpStatus.OK, 
+    description: 'Email verified successfully and user logged in',
+    schema: {
+      example: {
+        success: true,
+        message: 'Email verified successfully. You are now logged in.',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'john.doe@example.com',
+            fullName: 'John Doe',
+            role: 'CUSTOMER',
+            emailVerified: true
+          },
+          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        }
+      }
+    }
+  })
   async verifyEmailGet(@Query('token') token: string) {
     return this.authService.verifyEmail(token);
+  }
+
+  @Post('resend-verification')
+  @Throttle(3, 60000) // 3 requests per minute
+  @ApiOperation({ summary: 'Resend email verification' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Verification email sent if email exists and not verified',
+    schema: {
+      example: {
+        success: true,
+        message: 'Verification email has been sent.'
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Email already verified',
+    schema: {
+      example: {
+        success: false,
+        message: 'Email is already verified',
+        statusCode: 400
+      }
+    }
+  })
+  async resendVerificationEmail(@Body() resendVerificationDto: ResendVerificationDto) {
+    return this.authService.resendVerificationEmail(resendVerificationDto.email);
   }
 
   @Post('forgot-password')
@@ -222,7 +282,7 @@ export class AuthController {
   @Post('logout')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Logout user' })
+  @ApiOperation({ summary: 'Logout user from current device' })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Logged out successfully',
@@ -235,5 +295,51 @@ export class AuthController {
   })
   async logout(@Request() req, @Body() refreshTokenDto: RefreshTokenDto) {
     return this.authService.logout(req.user.id, refreshTokenDto.refreshToken);
+  }
+
+  @Delete('logout-all')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Logout user from all devices' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Logged out from all devices successfully',
+    schema: {
+      example: {
+        success: true,
+        message: 'Logged out from all devices successfully'
+      }
+    }
+  })
+  async logoutFromAllDevices(@Request() req) {
+    return this.authService.logoutFromAllDevices(req.user.id);
+  }
+
+  @Delete('cleanup-tokens')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @Throttle(1, 300000) // 1 request per 5 minutes
+  @ApiOperation({ 
+    summary: 'Cleanup expired tokens (Admin only)',
+    description: 'This endpoint is typically used by admin or scheduled jobs to clean up expired refresh tokens'
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Expired tokens cleaned up successfully',
+    schema: {
+      example: {
+        success: true,
+        message: 'Cleaned up 15 expired refresh tokens',
+        count: 15
+      }
+    }
+  })
+  async cleanupExpiredTokens() {
+    const count = await this.authService.cleanupExpiredTokens();
+    return {
+      success: true,
+      message: `Cleaned up ${count} expired refresh tokens`,
+      count,
+    };
   }
 }

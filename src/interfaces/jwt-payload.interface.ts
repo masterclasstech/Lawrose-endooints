@@ -1,10 +1,10 @@
 /* eslint-disable prettier/prettier */
-import { UserRole } from "@/common/enums/user-role.enum";
+import { $Enums } from '@prisma/client';
 
 export interface JwtPayload {
   sub: string;
   email: string;
-  role: UserRole;
+  role: $Enums.UserRole; // Use Prisma's generated enum
   iat?: number;
   exp?: number;
 }

@@ -23,8 +23,8 @@ model User {
   isActive        Boolean  @default(true)
   role            UserRole @default(CUSTOMER)
   
-  // OAuth fields
-  googleId        String?  @unique
+  // OAuth fields - Remove @unique from googleId and handle uniqueness differently
+  googleId        String?
   avatarUrl       String?
   provider        AuthProvider @default(TRADITIONAL)
   
@@ -59,6 +59,8 @@ model User {
   ratings              Rating[]
   refreshTokens        RefreshToken[]
   
+  // Add a compound unique index that only applies when googleId is not null
+  @@unique([googleId], name: "unique_google_id")
   @@map("users")
 }
 
