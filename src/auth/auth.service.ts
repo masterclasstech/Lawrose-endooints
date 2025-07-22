@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
   BadRequestException,
   Logger,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -13,6 +14,7 @@ import { EmailService } from '../common/notification/email.service';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { RegisterDto } from './dto/register.dto';
+import { GoogleAuthDto } from './dto/google-auth.dto';
 import { JwtPayload } from '../interfaces/jwt-payload.interface';
 import { AuthProvider } from '../common/enums/auth-provider.enum';
 import { 
@@ -22,6 +24,8 @@ import {
   BasicResponse,
   RefreshTokenResponse 
 } from '../interfaces/auth-response.interface';
+import { GoogleUser } from './types/auth.types';
+import { UserRole } from '@prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -95,6 +99,236 @@ export class AuthService {
       this.logger.error(`Registration failed for email: ${email}`, error.stack);
       throw error;
     }
+  }
+
+  /**
+   * Google OAuth Authentication
+   * Handles both registration and login for Google users
+   */
+  async googleAuth(googleAuthDto: GoogleAuthDto): Promise<AuthResponse> {
+    const { googleId, email, fullName, avatarUrl } = googleAuthDto;
+
+    try {
+      // Check if user exists with this email
+      let user = await this.prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          role: true,
+          emailVerified: true,
+          isActive: true,
+          provider: true,
+          googleId: true,
+          avatarUrl: true,
+        },
+      });
+
+      if (user) {
+        // User exists
+        if (!user.isActive) {
+          throw new UnauthorizedException('Your account has been deactivated');
+        }
+
+        // If user exists but doesn't have googleId, link the Google account
+        if (!user.googleId) {
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: {
+              googleId,
+              avatarUrl: avatarUrl || user.avatarUrl,
+              provider: AuthProvider.GOOGLE, // Update to Google provider
+              emailVerified: true, // Google accounts are pre-verified
+              lastLoginAt: new Date(),
+            },
+            select: {
+              id: true,
+              email: true,
+              fullName: true,
+              role: true,
+              emailVerified: true,
+              avatarUrl: true,
+              isActive: true,
+              googleId: true,
+              provider: true,
+            },
+          });
+
+          this.logger.log(`Google account linked to existing user: ${email}`);
+        } else {
+          // Update last login and avatar if provided
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: {
+              lastLoginAt: new Date(),
+              avatarUrl: avatarUrl || user.avatarUrl,
+            },
+            select: {
+              id: true,
+              email: true,
+              fullName: true,
+              role: true,
+              emailVerified: true,
+              avatarUrl: true,
+              isActive: true,
+              googleId: true,
+              provider: true,
+            },
+          });
+
+          this.logger.log(`Existing Google user logged in: ${email}`);
+        }
+      } else {
+        // Create new user
+        user = await this.prisma.user.create({
+          data: {
+            email,
+            fullName,
+            googleId,
+            avatarUrl,
+            provider: AuthProvider.GOOGLE,
+            emailVerified: true, // Google accounts are pre-verified
+            lastLoginAt: new Date(),
+          },
+          select: {
+            id: true,
+            email: true,
+            fullName: true,
+            role: true,
+            emailVerified: true,
+            avatarUrl: true,
+            isActive: true,
+            googleId: true,
+            provider: true,
+          },
+        });
+
+        this.logger.log(`New Google user registered: ${email}`);
+      }
+
+      // Generate tokens
+      const { accessToken, refreshToken } = await this.generateTokens({
+        sub: user.id,
+        email: user.email,
+        role: user.role,
+      }, user.id);
+
+      return {
+        success: true,
+        message: user.googleId ? 'Google login successful' : 'Google account created and logged in successfully',
+        data: {
+          user,
+          accessToken,
+          refreshToken,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`Google auth failed for email: ${email}`, error.stack);
+      throw new InternalServerErrorException('Google authentication failed');
+    }
+  }
+
+  /**
+   * Validate Google user from Passport strategy
+   */
+  async validateGoogleUser(googleData: any): Promise<GoogleUser> {
+    try {
+      // Check if user already exists (adjust method name based on your service)
+      let user = await this.findByGoogleId(googleData.googleId);
+    
+      if (!user) {
+        // Create new user if doesn't exist (adjust method name based on your service)
+        user = await this.createGoogleUser({
+          googleId: googleData.googleId,
+          email: googleData.email,
+          fullName: googleData.fullName,
+          avatarUrl: googleData.avatarUrl,
+          provider: googleData.provider,
+          // Add other required fields based on your GoogleUser interface
+          role: 'CUSTOMER', // or whatever default role you want
+          emailVerified: true, // Fixed property name - Google emails are pre-verified
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else {
+        // Update existing user info if needed
+          user = await this.updateUser(user.id, {
+            fullName: googleData.fullName,
+            avatarUrl: googleData.avatarUrl,
+            updatedAt: new Date(),
+          });
+      }
+
+      // Return the user object that matches GoogleUser interface
+      return {
+        id: user.id,
+        googleId: user.googleId,
+        email: user.email,
+        fullName: user.fullName,
+        avatarUrl: user.avatarUrl,
+        provider: user.provider,
+        role: user.role,
+        emailVerified: user.emailVerified, 
+        isActive: user.isActive, 
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        lastLoginAt: user.lastLoginAt, 
+        
+      };
+
+    } catch (error) {
+      this.logger.error('Error validating Google user:', error);
+      throw error;
+    }
+  } 
+
+  /**
+   * Find user by Google ID
+   */
+  async findByGoogleId(googleId: string) {
+    return this.prisma.user.findFirst({
+      where: { googleId },
+    });
+  }
+
+  /**
+   * Create a new Google user
+   */
+  async createGoogleUser(data: {
+    googleId: string;
+    email: string;
+    fullName: string;
+    avatarUrl?: string;
+    provider: string;
+    role: string;
+    emailVerified: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return this.prisma.user.create({
+      data: {
+        googleId: data.googleId,
+        email: data.email,
+        fullName: data.fullName,
+        avatarUrl: data.avatarUrl,
+        provider: data.provider as AuthProvider,
+        role: data.role as UserRole,
+        emailVerified: data.emailVerified,
+        createdAt: data.createdAt,
+        updatedAt: data.updatedAt,
+      },
+    });
+  }
+
+  /**
+   * Update user by ID
+   */
+  async updateUser(userId: string, data: any) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data,
+    });
   }
 
   async verifyEmail(token: string): Promise<AuthResponse> {
@@ -173,11 +407,17 @@ export class AuthService {
           emailVerified: true,
           isActive: true,
           role: true,
+          provider: true,
         },
       });
 
       if (!user || !user.password) {
         return null;
+      }
+
+      // Check if user registered with Google
+      if (user.provider === AuthProvider.GOOGLE && !user.password) {
+        throw new UnauthorizedException('This account was created with Google. Please login with Google.');
       }
 
       const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -293,7 +533,11 @@ export class AuthService {
     try {
       const user = await this.prisma.user.findUnique({
         where: { email },
-        select: { id: true, fullName: true },
+        select: { 
+          id: true, 
+          fullName: true,
+          provider: true,
+        },
       });
 
       if (!user) {
@@ -302,6 +546,11 @@ export class AuthService {
           success: true,
           message: 'If the email exists, a password reset link has been sent.',
         };
+      }
+
+      // Check if user registered with Google
+      if (user.provider === AuthProvider.GOOGLE) {
+        throw new BadRequestException('This account was created with Google. Please login with Google instead.');
       }
 
       const resetToken = crypto.randomBytes(32).toString('hex');
@@ -343,11 +592,20 @@ export class AuthService {
             gte: new Date(),
           },
         },
-        select: { id: true, email: true },
+        select: { 
+          id: true, 
+          email: true,
+          provider: true,
+        },
       });
 
       if (!user) {
         throw new BadRequestException('Invalid or expired reset token');
+      }
+
+      // Check if user registered with Google
+      if (user.provider === AuthProvider.GOOGLE) {
+        throw new BadRequestException('This account was created with Google. Password reset is not applicable.');
       }
 
       const hashedPassword = await bcrypt.hash(newPassword, 12);
@@ -427,6 +685,7 @@ export class AuthService {
           id: true,
           fullName: true,
           emailVerified: true,
+          provider: true,
         },
       });
 
@@ -435,6 +694,10 @@ export class AuthService {
           success: true,
           message: 'If the email exists and is not verified, a verification link has been sent.',
         };
+      }
+
+      if (user.provider === AuthProvider.GOOGLE) {
+        throw new BadRequestException('Google accounts are automatically verified');
       }
 
       if (user.emailVerified) {
@@ -475,7 +738,7 @@ export class AuthService {
   /**
    * Helper method to generate access and refresh tokens
    */
-  private async generateTokens(payload: JwtPayload, userId: string): Promise<TokenResponse> {
+  public async generateTokens(payload: JwtPayload, userId: string): Promise<TokenResponse> {
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
       secret: this.configService.get('JWT_REFRESH_SECRET'),

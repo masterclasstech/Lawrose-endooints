@@ -10,12 +10,14 @@ import {
   Get,
   Query,
   Delete,
+
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody, ApiExcludeEndpoint } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local.guard';
 import { JwtAuthGuard } from './guards/jwt.guard';
+//import { GoogleAuthGuard } from '../auth/guards/google.guard';
 import { RegisterDto } from './dto/register.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -23,6 +25,13 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { LoginDto } from './dto/login.dto';
+//import { GoogleAuthDto } from './dto/google-auth.dto';
+import { Response } from 'express'; 
+import { AuthGuard } from '@nestjs/passport';
+import { Req, Res } from '@nestjs/common';
+import { AuthenticatedRequest } from './types/express';
+import { AuthResponse, JwtTokens } from './types/auth.types';
+import { $Enums } from '@prisma/client';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -111,6 +120,142 @@ export class AuthController {
     // The LocalAuthGuard will validate credentials and attach user to req.user
     return this.authService.login(req.user);
   }
+
+
+  // =====================================================
+  // GOOGLE OAUTH ENDPOINTS
+  // =====================================================
+
+  @Get('google')
+  @ApiOperation({ 
+    summary: 'Initiate Google OAuth login',
+    description: 'Redirects user to Google OAuth consent screen'
+  })
+  @ApiResponse({ 
+    status: 302, 
+    description: 'Redirects to Google OAuth' 
+  })
+  @UseGuards(AuthGuard('google'))
+  async googleAuth(): Promise<void> {
+    // Initiates Google OAuth flow
+    // Passport automatically handles the redirect to Google
+  }
+
+  @Get('google/redirect')
+  @ApiExcludeEndpoint() // Exclude from Swagger as it's a callback URL
+  @UseGuards(AuthGuard('google'))
+  async googleAuthRedirect(
+    @Req() req: AuthenticatedRequest, 
+    @Res() res: Response
+  ): Promise<void> {
+    try {
+      const user = req.user;
+      
+      if (!user) {
+        console.error('No user found in request after Google OAuth');
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        res.redirect(`${frontendUrl}/auth/callback?error=no_user&success=false`);
+        return;
+      }
+
+      // Generate JWT tokens
+      const tokens: JwtTokens = await this.authService.generateTokens(
+        {
+          sub: user.id,
+          email: user.email,
+          role: user.role as $Enums.UserRole,
+        },
+        user.id
+      );
+
+      // Redirect to frontend with tokens as query params
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const redirectUrl = `${frontendUrl}/auth/callback?accessToken=${tokens.accessToken}&refreshToken=${tokens.refreshToken}&success=true&userId=${user.id}`;
+      
+      console.log(`Redirecting user ${user.email} to frontend with tokens`);
+      res.redirect(redirectUrl);
+
+    } catch (error) {
+      console.error('Google OAuth error:', error);
+      
+      // Redirect to frontend with error
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      res.redirect(`${frontendUrl}/auth/callback?error=auth_failed&success=false&message=${encodeURIComponent(error.message)}`);
+    }
+  }
+
+  @Get('google/status')
+  @ApiOperation({
+    summary: 'Check Google OAuth status',
+    description: 'Returns current authentication status'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Authentication status retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        authenticated: { type: 'boolean' },
+        user: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            email: { type: 'string' },
+            fullName: { type: 'string' },
+            role: { type: 'string' }
+          }
+        }
+      }
+    }
+  })
+  async getAuthStatus(@Req() req: AuthenticatedRequest): Promise<AuthResponse> {
+    if (req.user) {
+      return {
+        success: true,
+        message: 'User is authenticated',
+        data: {
+          user: {
+            id: req.user.id,
+            email: req.user.email,
+            fullName: req.user.fullName,
+            role: req.user.role,
+            avatarUrl: req.user.avatarUrl
+          },
+          accessToken: '', // Don't expose tokens in status check
+          refreshToken: ''
+        }
+      };
+    }
+
+    return {
+      success: false,
+      message: 'User is not authenticated',
+      error: 'Not authenticated'
+    };
+  }
+
+  @Get('google/failure')
+  @ApiOperation({
+    summary: 'Google OAuth failure endpoint',
+    description: 'Handles Google authentication failures'
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Google authentication failed'
+  })
+  async googleFailure(): Promise<AuthResponse> {
+    return {
+      success: false,
+      message: 'Google authentication failed',
+      error: 'Authentication failed'
+    };
+  }
+
+  // =====================================================
+  // EMAIL VERIFICATION AND PASSWORD RESET ENDPOINTS  
+  // =====================================================
 
   @Post('verify-email')
   @Throttle(5, 60000)
