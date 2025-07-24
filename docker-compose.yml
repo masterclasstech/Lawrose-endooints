@@ -1,31 +1,42 @@
-version: '3.8'
 
 services:
   app:
     container_name: lawrose-api
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      target: production  # Explicitly use production stage
+    networks:
+      - ecommerce-network
     ports:
       - "8000:5000"
     env_file:
       - .env
-    depends_on:
-      - elasticsearch  # Remove redis since using external
-    volumes:
-      - ./src:/app/src
-      - ./prisma:/app/prisma
-      - /app/node_modules
-    networks:
-      - ecommerce-network
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+    # REMOVED development volumes since we're using multi-stage production build
+    # The built app is already copied into the container
     restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    # Add health check to docker-compose level for better orchestration
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  # Remove redis since using external Redis Cloud
-  
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0  # Updated to newer version
+    container_name: lawrose-elasticsearch
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - bootstrap.memory_lock=true
     ports:
       - "9200:9200"
     volumes:
@@ -33,22 +44,52 @@ services:
     networks:
       - ecommerce-network
     restart: unless-stopped
+    # Add memory limits for better resource management
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 512m
+    # Add health check for elasticsearch
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.8.0
+    image: docker.elastic.co/kibana/kibana:8.15.0  # Updated to match Elasticsearch version
+    container_name: lawrose-kibana
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - SERVER_HOST=0.0.0.0
     ports:
       - "5601:5601"
-    depends_on:
-      - elasticsearch
     networks:
       - ecommerce-network
     restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    # Add health check for kibana
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
 volumes:
   elasticsearch_data:
+    driver: local
 
 networks:
   ecommerce-network:
     driver: bridge
+    # Add custom network configuration for better isolation
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

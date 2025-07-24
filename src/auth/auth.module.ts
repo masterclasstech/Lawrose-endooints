@@ -7,8 +7,9 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { LocalStrategy } from './strategies/local.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { PrismaModule } from '../../prisma/prisma.module';
+import { PrismaModule } from '../prisma/prisma.module';
 import { EmailService } from '../common/notification/email.service';
+import { GoogleStrategy } from './strategies/google.strategy';
 
 @Module({
   imports: [
@@ -24,9 +25,10 @@ import { EmailService } from '../common/notification/email.service';
       }),
       inject: [ConfigService],
     }),
+    
   ],
   controllers: [AuthController],
-  providers: [AuthService, LocalStrategy, JwtStrategy, EmailService],
+  providers: [AuthService, LocalStrategy, JwtStrategy, EmailService, GoogleStrategy],
   exports: [AuthService],
 })
 export class AuthModule {}

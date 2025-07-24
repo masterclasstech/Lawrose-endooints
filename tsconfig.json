@@ -9,6 +9,7 @@
     "target": "ES2021",
     "sourceMap": true,
     "outDir": "./dist",
+    "rootDir": "./src",
     "baseUrl": "./",
     "paths": {
       "@/*": ["src/*"],
@@ -16,16 +17,19 @@
       "@/config/*": ["src/config/*"],
       "@/auth/*": ["src/auth/*"],
       "@/users/*": ["src/users/*"],
-      "@/prisma/*": ["prisma/*"]
+      "@/prisma/*": ["src/prisma/*"]
     },
-    "incremental": true,
+    "incremental": false,
     "skipLibCheck": true,
     "strictNullChecks": false,
     "noImplicitAny": false,
     "strictBindCallApply": false,
     "forceConsistentCasingInFileNames": false,
-    "noFallthroughCasesInSwitch": false
+    "noFallthroughCasesInSwitch": false,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "node"
   },
-  "include": ["src/**/*", "prisma/**/*.ts"],
-  "exclude": ["node_modules", "dist", "test", "prisma/migrations"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "test", "prisma/migrations", "*.tsbuildinfo"]
 }
