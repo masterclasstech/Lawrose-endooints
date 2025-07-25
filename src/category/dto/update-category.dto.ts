@@ -1,5 +1,17 @@
 /* eslint-disable prettier/prettier */
-import { PartialType } from "@nestjs/swagger";
-import { CreateCategoryDto } from "./create-category.dto";
+import { PartialType, ApiPropertyOptional } from '@nestjs/swagger';
+import { CreateCategoryDto } from './create-category.dto';
 
-export class UpdateCategoryDto extends PartialType(CreateCategoryDto) {}
+export class UpdateCategoryDto extends PartialType(CreateCategoryDto) {
+    @ApiPropertyOptional({
+        description: 'Category name',
+        example: 'Men\'s Clothing Updated'
+    })
+    name?: string;
+
+    @ApiPropertyOptional({
+        description: 'Category slug',
+        example: 'mens-clothing-updated'
+    })
+    slug?: string;
+}
