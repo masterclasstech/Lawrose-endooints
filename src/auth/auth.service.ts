@@ -24,7 +24,7 @@ import {
   BasicResponse,
   RefreshTokenResponse 
 } from '../interfaces/auth-response.interface';
-import { GoogleUser } from './types/auth.types';
+//import { GoogleUser } from './types/auth.types';
 import { UserRole } from '@prisma/client';
 
 @Injectable()
@@ -81,14 +81,23 @@ export class AuthService {
         },
       });
 
-      // Send verification email
-      await this.emailService.sendVerificationEmail(
-        email,
-        emailVerificationToken,
-        fullName,
-      );
-
-      this.logger.log(`User registered successfully: ${email}`);
+      // Try to send verification email, but don't fail registration if email fails
+      try {
+        const emailSent = await this.emailService.sendVerificationEmail(
+          email,
+          emailVerificationToken,
+          fullName,
+        );
+        
+        if (emailSent) {
+          this.logger.log(`User registered successfully and verification email sent: ${email}`);
+        } else {
+          this.logger.warn(`User registered successfully but verification email failed: ${email}`);
+        }
+      } catch (emailError) {
+        this.logger.error(`User registered successfully but email service failed for: ${email}`, emailError.stack);
+        // Continue with registration success even if email fails
+      }
 
       return {
         success: true,
@@ -229,60 +238,57 @@ export class AuthService {
     }
   }
 
-  /**
-   * Validate Google user from Passport strategy
-   */
-  async validateGoogleUser(googleData: any): Promise<GoogleUser> {
-    try {
-      // Check if user already exists (adjust method name based on your service)
-      let user = await this.findByGoogleId(googleData.googleId);
-    
-      if (!user) {
-        // Create new user if doesn't exist (adjust method name based on your service)
-        user = await this.createGoogleUser({
-          googleId: googleData.googleId,
-          email: googleData.email,
-          fullName: googleData.fullName,
-          avatarUrl: googleData.avatarUrl,
-          provider: googleData.provider,
-          // Add other required fields based on your GoogleUser interface
-          role: 'CUSTOMER', // or whatever default role you want
-          emailVerified: true, // Fixed property name - Google emails are pre-verified
-          createdAt: new Date(),
-          updatedAt: new Date(),
+  /*
+      * Validate Google user
+      * This method is called by the GoogleStrategy to validate the user
+  */
+
+    async validateGoogleUser(googleUser: any) {
+      try {
+      // Check if user already exists
+      let user = await this.prisma.user.findUnique({
+        where: { email: googleUser.email },
+      });
+
+      if (user) {
+        // Update user with Google info if needed
+        user = await this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            fullName: googleUser.fullName,
+            avatarUrl: googleUser.picture,
+            emailVerified: true, // Google emails are verified
+            // Only update if user doesn't have Google ID
+            ...((!user.googleId) && { googleId: googleUser.id }),
+          },
         });
       } else {
-        // Update existing user info if needed
-          user = await this.updateUser(user.id, {
-            fullName: googleData.fullName,
-            avatarUrl: googleData.avatarUrl,
-            updatedAt: new Date(),
-          });
+        // Create new user
+        user = await this.prisma.user.create({
+          data: {
+            email: googleUser.email,
+            fullName: googleUser.fullName,
+            avatarUrl: googleUser.picture,
+            emailVerified: true,
+            googleId: googleUser.id,
+            role: 'CUSTOMER', // Default role
+            // No password needed for Google OAuth users
+          },
+        });
       }
 
-      // Return the user object that matches GoogleUser interface
       return {
-        id: user.id,
-        googleId: user.googleId,
-        email: user.email,
-        fullName: user.fullName,
-        avatarUrl: user.avatarUrl,
-        provider: user.provider,
-        role: user.role,
-        emailVerified: user.emailVerified, 
-        isActive: user.isActive, 
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        lastLoginAt: user.lastLoginAt, 
-        
-      };
-
-    } catch (error) {
-      this.logger.error('Error validating Google user:', error);
-      throw error;
-    }
-  } 
-
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+      avatarUrl: user.avatarUrl,
+    };
+  } catch (error) {
+    console.error('Error validating Google user:', error);
+    throw new Error('Failed to validate Google user');
+  }
+}
   /**
    * Find user by Google ID
    */

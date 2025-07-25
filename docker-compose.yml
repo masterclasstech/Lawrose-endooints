@@ -15,28 +15,61 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=5000
-    # REMOVED development volumes since we're using multi-stage production build
-    # The built app is already copied into the container
+      # Email service specific environment variables (override .env if needed)
+      - EMAIL_USER=${EMAIL_USER:-shop.lawrose@gmail.com}
+      - EMAIL_PASS=${EMAIL_PASS}
+      - EMAIL_SERVICE=${EMAIL_SERVICE:-gmail}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+    # DNS configuration for better email service connectivity
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
+    # Add extra hosts for Gmail SMTP reliability
+    extra_hosts:
+      - "smtp.gmail.com:142.251.163.108"
+      - "smtp.gmail.com:142.251.163.109"
+      - "smtp.gmail.com:74.125.133.108"
     restart: unless-stopped
     depends_on:
       elasticsearch:
         condition: service_healthy
-    # Add health check to docker-compose level for better orchestration
+    # Enhanced health check that includes email service
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health && curl -f http://localhost:5000/api/auth/health || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 3
-      start_period: 40s
+      start_period: 60s
+    # Add memory limits for better resource management
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+        reservations:
+          memory: 512m
+          cpus: '0.5'
+    # Add logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0  # Updated to newer version
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
     container_name: lawrose-elasticsearch
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - bootstrap.memory_lock=true
+      - network.host=0.0.0.0
+      - http.port=9200
+      - transport.host=127.0.0.1
     ports:
       - "9200:9200"
     volumes:
@@ -49,23 +82,35 @@ services:
       resources:
         limits:
           memory: 1g
+          cpus: '1.0'
         reservations:
           memory: 512m
-    # Add health check for elasticsearch
+          cpus: '0.5'
+    # Enhanced health check for elasticsearch
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=30s || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
       start_period: 60s
+    # Add logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.15.0  # Updated to match Elasticsearch version
+    image: docker.elastic.co/kibana/kibana:8.15.0
     container_name: lawrose-kibana
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - SERVER_NAME=kibana
       - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=5601
+      # Add timeout settings for better stability
+      - ELASTICSEARCH_REQUESTTIMEOUT=60000
+      - ELASTICSEARCH_PINGTIMEOUT=60000
     ports:
       - "5601:5601"
     networks:
@@ -74,22 +119,72 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
-    # Add health check for kibana
+    # Enhanced health check for kibana
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
-      start_period: 60s
+      start_period: 90s
+    # Add memory limits
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
+        reservations:
+          memory: 512m
+          cpus: '0.5'
+    # Add logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Add a mail service for testing (MailHog for development)
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: lawrose-mailhog
+    ports:
+      - "1025:1025"  # SMTP port
+      - "8025:8025"  # Web UI port
+    networks:
+      - ecommerce-network
+    restart: unless-stopped
+    profiles:
+      - development  # Only start in development profile
+    # Add logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
 
 volumes:
   elasticsearch_data:
     driver: local
+    # Add volume labels for better management
+    labels:
+      - "app=lawrose"
+      - "service=elasticsearch"
 
 networks:
   ecommerce-network:
     driver: bridge
-    # Add custom network configuration for better isolation
+    # Enhanced network configuration for better email service connectivity
     ipam:
+      driver: default
       config:
         - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+    # Add network labels
+    labels:
+      - "app=lawrose"
+      - "environment=production"
+    # Enable IPv6 if needed
+    enable_ipv6: false
+    # Add driver options for better performance
+    driver_opts:
+      com.docker.network.bridge.name: lawrose-bridge
+      com.docker.network.driver.mtu: 1500

@@ -10,14 +10,16 @@ import {
   Get,
   Query,
   Delete,
-
+  Req,
+  Res,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody, ApiExcludeEndpoint } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { AuthGuard } from '@nestjs/passport';
+import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LocalAuthGuard } from './guards/local.guard';
 import { JwtAuthGuard } from './guards/jwt.guard';
-//import { GoogleAuthGuard } from '../auth/guards/google.guard';
 import { RegisterDto } from './dto/register.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -25,18 +27,18 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { LoginDto } from './dto/login.dto';
-//import { GoogleAuthDto } from './dto/google-auth.dto';
-import { Response } from 'express'; 
-import { AuthGuard } from '@nestjs/passport';
-import { Req, Res } from '@nestjs/common';
 import { AuthenticatedRequest } from './types/express';
-import { AuthResponse, JwtTokens } from './types/auth.types';
+import { AuthResponse } from './types/auth.types';
 import { $Enums } from '@prisma/client';
 
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
   constructor(private authService: AuthService) {}
+
+  // =====================================================
+  // BASIC AUTHENTICATION ENDPOINTS
+  // =====================================================
 
   @Post('register')
   @Throttle(5, 60000) // 5 requests per minute
@@ -80,7 +82,7 @@ export class AuthController {
   @UseGuards(LocalAuthGuard)
   @Throttle(10, 60000) // 10 requests per minute
   @ApiOperation({ summary: 'User login' })
-  @ApiBody({ type: LoginDto }) // Add this to specify the request body
+  @ApiBody({ type: LoginDto })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Login successful',
@@ -96,8 +98,8 @@ export class AuthController {
             role: 'CUSTOMER',
             emailVerified: true
           },
-        accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
-        refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
         }
       }
     }
@@ -113,14 +115,9 @@ export class AuthController {
       }
     }
   })
-  async login(
-    @Body() loginDto: LoginDto, // Add this to validate the request body
-    @Request() req
-  ) {
-    // The LocalAuthGuard will validate credentials and attach user to req.user
+  async login(@Body() loginDto: LoginDto, @Request() req) {
     return this.authService.login(req.user);
   }
-
 
   // =====================================================
   // GOOGLE OAUTH ENDPOINTS
@@ -129,37 +126,88 @@ export class AuthController {
   @Get('google')
   @ApiOperation({ 
     summary: 'Initiate Google OAuth login',
-    description: 'Redirects user to Google OAuth consent screen'
+    description: 'Redirects user to Google OAuth consent screen. This endpoint cannot be tested in Swagger as it requires browser redirection.'
   })
   @ApiResponse({ 
     status: 302, 
-    description: 'Redirects to Google OAuth' 
+    description: 'Redirects to Google OAuth consent screen',
+    headers: {
+      Location: {
+        description: 'Google OAuth URL',
+        schema: {
+          type: 'string',
+          example: 'https://accounts.google.com/oauth/authorize?client_id=...'
+        }
+      }
+    }
   })
   @UseGuards(AuthGuard('google'))
-  async googleAuth(): Promise<void> {
+  async googleAuth() {
     // Initiates Google OAuth flow
     // Passport automatically handles the redirect to Google
   }
 
-  @Get('google/redirect')
-  @ApiExcludeEndpoint() // Exclude from Swagger as it's a callback URL
+  @Get('google/redircect')
+  @ApiOperation({ 
+    summary: 'Handle Google OAuth callback',
+    description: 'Processes the callback from Google OAuth and redirects to frontend with authentication result. This is an internal endpoint called by Google.'
+  })
+  @ApiResponse({ 
+    status: 302, 
+    description: 'Redirects to frontend with authentication result',
+    headers: {
+      Location: {
+        description: 'Frontend URL with auth result',
+        schema: {
+          type: 'string',
+          example: 'https://your-frontend.com/auth/success'
+        }
+      },
+      'Set-Cookie': {
+        description: 'HTTP-only cookies containing tokens',
+        schema: {
+          type: 'array',
+          items: {
+            type: 'string',
+            example: 'accessToken=eyJhbG...; HttpOnly; Secure; SameSite=Lax'
+          }
+        }
+      }
+    }
+  })
+  @ApiResponse({
+    status: 302,
+    description: 'Authentication failed - redirects to error page',
+    headers: {
+      Location: {
+        description: 'Frontend error URL',
+        schema: {
+          type: 'string',
+          example: 'https://your-frontend.com/auth/error?message=authentication_failed'
+        }
+      }
+    }
+  })
   @UseGuards(AuthGuard('google'))
-  async googleAuthRedirect(
-    @Req() req: AuthenticatedRequest, 
-    @Res() res: Response
-  ): Promise<void> {
+  async googleAuthCallback(@Req() req: AuthenticatedRequest, @Res() res: Response) {
+    console.log('Google OAuth callback triggered');
+    console.log('User from request:', req.user);
+    console.log('Frontend URL:', process.env.FRONTEND_URL);
+    
     try {
       const user = req.user;
       
       if (!user) {
-        console.error('No user found in request after Google OAuth');
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        res.redirect(`${frontendUrl}/auth/callback?error=no_user&success=false`);
-        return;
+        console.error('No user found in request');
+        const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=authentication_failed`;
+        console.log('Redirecting to error URL:', errorUrl);
+        return res.redirect(errorUrl);
       }
-
-      // Generate JWT tokens
-      const tokens: JwtTokens = await this.authService.generateTokens(
+      
+      console.log('Generating tokens for user:', user.email);
+      
+      // Generate tokens for the authenticated user
+      const tokens = await this.authService.generateTokens(
         {
           sub: user.id,
           email: user.email,
@@ -168,45 +216,72 @@ export class AuthController {
         user.id
       );
 
-      // Redirect to frontend with tokens as query params
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      const redirectUrl = `${frontendUrl}/auth/callback?accessToken=${tokens.accessToken}&refreshToken=${tokens.refreshToken}&success=true&userId=${user.id}`;
-      
-      console.log(`Redirecting user ${user.email} to frontend with tokens`);
-      res.redirect(redirectUrl);
+      console.log('Tokens generated successfully');
 
-    } catch (error) {
-      console.error('Google OAuth error:', error);
+      // Set HTTP-only cookies for security
+      res.cookie('accessToken', tokens.accessToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 15 * 60 * 1000, // 15 minutes
+      });
+
+      res.cookie('refreshToken', tokens.refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      });
+
+      // Redirect to frontend success page
+      const successUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success`;
+      console.log('Redirecting to success URL:', successUrl);
+      return res.redirect(successUrl);
       
-      // Redirect to frontend with error
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      res.redirect(`${frontendUrl}/auth/callback?error=auth_failed&success=false&message=${encodeURIComponent(error.message)}`);
+    } catch (error) {
+      console.error('Google auth error:', error);
+      const errorUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/error?message=server_error`;
+      console.log('Redirecting to error URL due to exception:', errorUrl);
+      return res.redirect(errorUrl);
     }
   }
 
   @Get('google/status')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Check Google OAuth status',
-    description: 'Returns current authentication status'
+    summary: 'Check Google OAuth authentication status',
+    description: 'Returns current authentication status for the logged-in user'
   })
   @ApiResponse({
-    status: 200,
+    status: HttpStatus.OK,
     description: 'Authentication status retrieved successfully',
     schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        message: { type: 'string' },
-        authenticated: { type: 'boolean' },
-        user: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            email: { type: 'string' },
-            fullName: { type: 'string' },
-            role: { type: 'string' }
-          }
+      example: {
+        success: true,
+        message: 'User is authenticated',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'john.doe@example.com',
+            fullName: 'John Doe',
+            role: 'CUSTOMER',
+            avatarUrl: 'https://lh3.googleusercontent.com/...'
+          },
+          accessToken: '',
+          refreshToken: ''
         }
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'User is not authenticated',
+    schema: {
+      example: {
+        success: false,
+        message: 'User is not authenticated',
+        error: 'Not authenticated'
       }
     }
   })
@@ -239,11 +314,18 @@ export class AuthController {
   @Get('google/failure')
   @ApiOperation({
     summary: 'Google OAuth failure endpoint',
-    description: 'Handles Google authentication failures'
+    description: 'Handles Google authentication failures and returns error response'
   })
   @ApiResponse({
-    status: 401,
-    description: 'Google authentication failed'
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'Google authentication failed',
+    schema: {
+      example: {
+        success: false,
+        message: 'Google authentication failed',
+        error: 'Authentication failed'
+      }
+    }
   })
   async googleFailure(): Promise<AuthResponse> {
     return {
@@ -297,7 +379,10 @@ export class AuthController {
   }
 
   @Get('verify-email')
-  @ApiOperation({ summary: 'Verify email via GET request (for email links)' })
+  @ApiOperation({ 
+    summary: 'Verify email via GET request (for email links)',
+    description: 'Alternative email verification endpoint for direct email links'
+  })
   @ApiResponse({ 
     status: HttpStatus.OK, 
     description: 'Email verified successfully and user logged in',
@@ -398,6 +483,10 @@ export class AuthController {
       resetPasswordDto.newPassword,
     );
   }
+
+  // =====================================================
+  // TOKEN MANAGEMENT ENDPOINTS
+  // =====================================================
 
   @Post('refresh-token')
   @Throttle(10, 60000)

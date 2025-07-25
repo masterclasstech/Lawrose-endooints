@@ -7,14 +7,18 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { LocalStrategy } from './strategies/local.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { GoogleStrategy } from './strategies/google.strategy';
 import { PrismaModule } from '../prisma/prisma.module';
 import { EmailService } from '../common/notification/email.service';
-import { GoogleStrategy } from './strategies/google.strategy';
 
 @Module({
   imports: [
+    ConfigModule,
     PrismaModule,
-    PassportModule,
+    PassportModule.register({ 
+      defaultStrategy: 'jwt',
+      session: false,
+    }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({
@@ -25,10 +29,15 @@ import { GoogleStrategy } from './strategies/google.strategy';
       }),
       inject: [ConfigService],
     }),
-    
   ],
   controllers: [AuthController],
-  providers: [AuthService, LocalStrategy, JwtStrategy, EmailService, GoogleStrategy],
-  exports: [AuthService],
+  providers: [
+    AuthService,
+    LocalStrategy,
+    JwtStrategy,
+    GoogleStrategy,
+    EmailService,
+  ],
+  exports: [AuthService, PassportModule],
 })
 export class AuthModule {}
