@@ -10,6 +10,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { PrismaModule } from '../prisma/prisma.module';
 import { EmailService } from '../common/notification/email.service';
+import { AdminLocalStrategy } from './strategies/admin.local.strategy';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { EmailService } from '../common/notification/email.service';
     AuthService,
     LocalStrategy,
     JwtStrategy,
+    AdminLocalStrategy,
     GoogleStrategy,
     EmailService,
   ],

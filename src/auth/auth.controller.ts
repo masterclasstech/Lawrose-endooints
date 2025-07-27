@@ -12,6 +12,7 @@ import {
   Delete,
   Req,
   Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -30,11 +31,18 @@ import { LoginDto } from './dto/login.dto';
 import { AuthenticatedRequest } from './types/express';
 import { AuthResponse } from './types/auth.types';
 import { $Enums } from '@prisma/client';
+import { AdminRegisterDto } from '../auth/dto/admin.reg.dto';
+import { AdminLoginDto } from '../auth/dto/admin.login.dto';
+import { AdminLocalAuthGuard } from '../auth/guards/admin.guard';
+import { PrismaService } from '../prisma/prisma.service';
 
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private prisma: PrismaService
+  ) {}
 
   // =====================================================
   // BASIC AUTHENTICATION ENDPOINTS
@@ -118,6 +126,202 @@ export class AuthController {
   async login(@Body() loginDto: LoginDto, @Request() req) {
     return this.authService.login(req.user);
   }
+
+  // =====================================================
+  // ADMIN AUTHENTICATION ENDPOINTS
+  // =====================================================
+
+  @Post('admin/register')
+  @Throttle(3, 60000) // 3 requests per minute for admin registration
+  @ApiOperation({
+    summary: 'Register a new admin user',
+    description: 'Creates a new admin account with admin secret key validation. Admin accounts are automatically verified and logged in upon creation.'
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'Admin registered successfully and logged in',
+    schema: {
+      example: {
+        success: true,
+        message: 'Admin account created successfully. You are now logged in.',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'admin@shoppmooré.com',
+            fullName: 'John Admin',
+            role: 'ADMIN',
+            emailVerified: true,
+            isActive: true,
+            createdAt: '2025-01-20T10:30:00Z'
+          },
+          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        }
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'Invalid admin secret key',
+    schema: {
+      example: {
+        success: false,
+        message: 'Invalid admin secret key. Access denied.',
+        statusCode: 401
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'Admin already exists',
+    schema: {
+      example: {
+        success: false,
+        message: 'Admin with this email already exists',
+        statusCode: 409
+      }
+    }
+  })
+  async adminRegister(@Body() adminRegisterDto: AdminRegisterDto) {
+    return this.authService.adminRegister(adminRegisterDto);
+  }
+
+  @Post('admin/login')
+  @UseGuards(AdminLocalAuthGuard)
+  @Throttle(5, 60000) // 5 requests per minute for admin login
+  @ApiOperation({ 
+    summary: 'Admin user login',
+    description: 'Authenticates admin users with admin secret key validation. Only users with ADMIN role can login through this endpoint.'
+  })
+  @ApiBody({ type: AdminLoginDto })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Admin login successful',
+    schema: {
+      example: {
+        success: true,
+        message: 'Admin login successful',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'admin@shoppmooré.com',
+            fullName: 'John Admin',
+            role: 'ADMIN',
+            emailVerified: true
+          },
+          accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+          refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        }
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'Invalid credentials or admin secret key',
+    schema: {
+      example: {
+        success: false,
+        message: 'Invalid admin credentials or access denied',
+        statusCode: 401
+      }
+    }
+  })
+  async adminLogin(@Body() adminLoginDto: AdminLoginDto) {
+    return this.authService.adminLogin(adminLoginDto);
+  }
+
+  @Get('admin/profile')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get admin profile',
+    description: 'Returns the profile information of the currently authenticated admin user'
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Admin profile retrieved successfully',
+    schema: {
+      example: {
+        success: true,
+        message: 'Admin profile retrieved successfully',
+        data: {
+          user: {
+            id: '507f1f77bcf86cd799439011',
+            email: 'admin@shoppmooré.com',
+            fullName: 'John Admin',
+            role: 'ADMIN',
+            emailVerified: true,
+            phoneNumber: '+1234567890',
+            isActive: true,
+            createdAt: '2025-01-20T10:30:00Z',
+            lastLoginAt: '2025-01-27T14:30:00Z'
+          }
+        }
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: 'User is not authenticated or not an admin',
+    schema: {
+      example: {
+        success: false,
+        message: 'Access denied. Admin privileges required.',
+        statusCode: 401
+      }
+    }
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: 'User is not an admin',
+    schema: {
+      example: {
+        success: false,
+        message: 'Access denied. Admin privileges required.',
+        statusCode: 403
+      }
+    }
+  })
+  async getAdminProfile(@Request() req): Promise<AuthResponse> {
+    const user = req.user;
+  
+    if (!user || user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Access denied. Admin privileges required.');
+    }
+
+    // Get complete admin profile
+    const adminProfile = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        role: true,
+        emailVerified: true,
+        phoneNumber: true,
+        isActive: true,
+        createdAt: true,
+        lastLoginAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!adminProfile) {
+      throw new UnauthorizedException('Admin profile not found');
+    }
+
+    return {
+      success: true,
+      message: 'Admin profile retrieved successfully',
+      data: {
+        user: adminProfile,
+        accessToken: '',
+        refreshToken: ''
+      }
+    };
+  }
+
+
 
   // =====================================================
   // GOOGLE OAUTH ENDPOINTS

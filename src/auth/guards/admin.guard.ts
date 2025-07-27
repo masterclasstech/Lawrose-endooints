@@ -1,5 +1,4 @@
 /* eslint-disable prettier/prettier */
-// src/auth/guards/admin-local.guard.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 
