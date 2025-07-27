@@ -26,6 +26,10 @@ import {
 } from '../interfaces/auth-response.interface';
 //import { GoogleUser } from './types/auth.types';
 import { UserRole } from '@prisma/client';
+import { AdminRegisterDto } from '../auth/dto/admin.reg.dto';
+import { AdminLoginDto } from '../auth/dto/admin.login.dto';
+
+
 
 @Injectable()
 export class AuthService {
@@ -109,6 +113,224 @@ export class AuthService {
       throw error;
     }
   }
+
+/**
+ * Admin Registration
+ * Creates an admin account with secret key validation
+ */
+  async adminRegister(adminRegisterDto: AdminRegisterDto): Promise<AuthResponse> {
+    const { email, password, fullName, phoneNumber, adminSecretKey } = adminRegisterDto;
+
+    try {
+      // Validate admin secret key
+      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
+      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
+        throw new UnauthorizedException('Invalid admin secret key. Access denied.');
+      }
+
+      // Check if admin already exists
+      const existingAdmin = await this.prisma.user.findUnique({
+        where: { email },
+        select: { id: true, role: true },
+      });
+
+      if (existingAdmin) {
+          if (existingAdmin.role === 'ADMIN') {
+            throw new ConflictException('Admin with this email already exists');
+        } else {
+          throw new ConflictException('User with this email already exists as a customer');
+        }
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 12);
+
+      // Create admin user
+      const admin = await this.prisma.user.create({
+        data: {
+          email,
+          fullName,
+          password: hashedPassword,
+          phoneNumber,
+          role: 'ADMIN',
+          emailVerified: true, // Admins are auto-verified
+          provider: AuthProvider.TRADITIONAL,
+          isActive: true,
+          lastLoginAt: new Date(),
+        },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          role: true,
+          emailVerified: true,
+          isActive: true,
+          createdAt: true,
+        },
+      });
+
+      // Generate tokens for immediate login
+      const { accessToken, refreshToken } = await this.generateTokens({
+        sub: admin.id,
+        email: admin.email,
+        role: admin.role,
+      }, admin.id);
+
+      this.logger.log(`Admin account created and logged in successfully: ${email}`);
+
+      return {
+        success: true,
+        message: 'Admin account created successfully. You are now logged in.',
+        data: {
+          user: admin,
+          accessToken,
+          refreshToken,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`Admin registration failed for email: ${email}`, error.stack);
+      throw error;
+    }
+  }
+
+/**
+ * Admin Login
+ * Authenticates admin users with secret key validation
+ */
+  async adminLogin(adminLoginDto: AdminLoginDto): Promise<AuthResponse> {
+    const { email, password, adminSecretKey } = adminLoginDto;
+
+    try {
+      // Validate admin secret key
+      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
+      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
+        throw new UnauthorizedException('Invalid admin secret key. Access denied.');
+      }
+
+      // Find admin user
+      const admin = await this.prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          password: true,
+          role: true,
+          emailVerified: true,
+          isActive: true,
+          provider: true,
+        },
+      });
+
+      if (!admin) {
+        throw new UnauthorizedException('Invalid credentials or admin not found');
+      }
+
+      // Check if user is actually an admin
+      if (admin.role !== 'ADMIN') {
+        throw new UnauthorizedException('Access denied. Admin privileges required.');
+      }
+
+      // Check if account is active
+      if (!admin.isActive) {
+        throw new UnauthorizedException('Admin account has been deactivated');
+      }
+
+      // Validate password
+      if (!admin.password) {
+        throw new UnauthorizedException('Invalid admin account configuration');
+      }
+
+      const isPasswordValid = await bcrypt.compare(password, admin.password);
+      if (!isPasswordValid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      // Generate tokens
+      const { accessToken, refreshToken } = await this.generateTokens({
+        sub: admin.id,
+        email: admin.email,
+        role: admin.role,
+      }, admin.id);
+
+      // Update last login
+      await this.prisma.user.update({
+        where: { id: admin.id },
+        data: { lastLoginAt: new Date() },
+      });
+
+      this.logger.log(`Admin logged in successfully: ${email}`);
+
+      return {
+        success: true,
+        message: 'Admin login successful',
+        data: {
+          user: {
+            id: admin.id,
+            email: admin.email,
+            fullName: admin.fullName,
+            role: admin.role,
+            emailVerified: admin.emailVerified,
+          },
+          accessToken,
+          refreshToken,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`Admin login failed for email: ${email}`, error.stack);
+      throw error;
+    }
+  }
+
+  /**
+  * Validate Admin User (for guards)
+  * Similar to validateUser but specifically for admin authentication
+  */
+  async validateAdminUser(email: string, password: string, adminSecretKey: string) {
+    try {
+      // Validate admin secret key first
+      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
+      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
+        return null;
+      }
+
+      const admin = await this.prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          password: true,
+          role: true,
+          emailVerified: true,
+          isActive: true,
+          provider: true,
+        },
+      });
+
+      if (!admin || !admin.password || admin.role !== 'ADMIN') {
+        return null;
+      }
+
+    const isPasswordValid = await bcrypt.compare(password, admin.password);
+      if (!isPasswordValid) {
+        return null;
+      }
+
+      if (!admin.isActive) {
+        throw new UnauthorizedException('Admin account has been deactivated');
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { password: _, ...result } = admin;
+      return result;
+    } catch (error) {
+      this.logger.error(`Admin validation failed for email: ${email}`, error.stack);
+      throw error;
+    }
+  }
+
+
 
   /**
    * Google OAuth Authentication
