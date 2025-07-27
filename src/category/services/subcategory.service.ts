@@ -17,19 +17,40 @@ export interface SubcategoryWithCounts extends Subcategory {
   };
 }
 
+interface ImageUploadService {
+  uploadImage(file: Express.Multer.File, folder: string): Promise<string>;
+  deleteImage(imageUrl: string): Promise<void>;
+}
+
 @Injectable()
 export class SubcategoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly imageUploadService?: ImageUploadService
+  ) {}
 
   /**
-   * Create a new subcategory with optimized validation
+   * Create a new subcategory with image upload support
    * Time Complexity: O(log n) for checks + O(1) for creation
    */
-  async create(createSubcategoryDto: CreateSubcategoryDto): Promise<Subcategory> {
-    const { name, slug: providedSlug, categoryId, ...rest } = createSubcategoryDto;
+  async create(
+    createSubcategoryDto: CreateSubcategoryDto, 
+    imageFile?: Express.Multer.File
+  ): Promise<Subcategory> {
+    const { name, slug: providedSlug, categoryId, imageUrl, ...rest } = createSubcategoryDto;
 
     // Generate slug - O(1)
     const slug = providedSlug || generateSlug(name);
+
+    // Handle image upload first to fail fast if there's an issue
+    let finalImageUrl = imageUrl;
+    if (imageFile && this.imageUploadService) {
+      try {
+        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'subcategories');
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
+    }
 
     // Batch validation in parallel - O(log n) each
     const [categoryExists, existingSubcategory] = await Promise.all([
@@ -39,28 +60,34 @@ export class SubcategoryService {
       }),
       this.prisma.subcategory.findFirst({
         where: {
+          categoryId,
           OR: [
-            { 
-              name: { equals: name, mode: 'insensitive' },
-              categoryId 
-            },
-            { categoryId, slug }
+            { name: { equals: name, mode: 'insensitive' } },
+            { slug }
           ]
         },
-        select: { id: true, name: true, slug: true, categoryId: true }
+        select: { id: true, name: true, slug: true }
       })
     ]);
 
     if (!categoryExists) {
+      // Clean up uploaded image if category doesn't exist
+      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
+        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      }
       throw new NotFoundException(`Category with ID ${categoryId} not found or inactive`);
     }
 
     if (existingSubcategory) {
-      if (existingSubcategory.name.toLowerCase() === name.toLowerCase() && 
-          existingSubcategory.categoryId === categoryId) {
+      // Clean up uploaded image if there's a conflict
+      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
+        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      }
+      
+      if (existingSubcategory.name.toLowerCase() === name.toLowerCase()) {
         throw new ConflictException('Subcategory with this name already exists in this category');
       }
-      if (existingSubcategory.slug === slug && existingSubcategory.categoryId === categoryId) {
+      if (existingSubcategory.slug === slug) {
         throw new ConflictException('Subcategory with this slug already exists in this category');
       }
     }
@@ -71,6 +98,7 @@ export class SubcategoryService {
         name,
         slug,
         categoryId,
+        imageUrl: finalImageUrl,
         ...rest
       }
     });
@@ -83,7 +111,7 @@ export class SubcategoryService {
   async findAll(query: SubcategoryQueryDto): Promise<PaginatedResponseDto<SubcategoryWithCounts>> {
     const {
       page = 1,
-      limit = 10,
+      limit = Math.min(query.limit || 10, 50), // Enforce max limit
       search,
       categoryId,
       isActive,
@@ -280,24 +308,51 @@ export class SubcategoryService {
   }
 
   /**
-   * Update subcategory with conflict checking
+   * Update subcategory with image handling and conflict checking
    * Time Complexity: O(log n) for checks + O(1) for update
    */
-  async update(id: string, updateSubcategoryDto: UpdateSubcategoryDto): Promise<Subcategory> {
+  async update(
+    id: string, 
+    updateSubcategoryDto: UpdateSubcategoryDto, 
+    imageFile?: Express.Multer.File,
+    removeImage: boolean = false
+  ): Promise<Subcategory> {
     if (!id || typeof id !== 'string') {
       throw new BadRequestException('Invalid subcategory ID');
     }
 
-    const { name, slug: providedSlug, ...rest } = updateSubcategoryDto;
+    const { name, slug: providedSlug, imageUrl, ...rest } = updateSubcategoryDto;
 
     // Check if subcategory exists - O(log n)
     const existingSubcategory = await this.prisma.subcategory.findUnique({
       where: { id },
-      select: { id: true, name: true, slug: true, categoryId: true }
+      select: { id: true, name: true, slug: true, categoryId: true, imageUrl: true }
     });
 
     if (!existingSubcategory) {
       throw new NotFoundException(`Subcategory with ID ${id} not found`);
+    }
+
+    // Handle image operations
+    let finalImageUrl = imageUrl;
+    const oldImageUrl = existingSubcategory.imageUrl;
+
+    if (removeImage) {
+      finalImageUrl = null;
+      // Delete old image if it exists
+      if (oldImageUrl && this.imageUploadService) {
+        await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+      }
+    } else if (imageFile && this.imageUploadService) {
+      try {
+        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'subcategories');
+        // Delete old image after successful upload
+        if (oldImageUrl && oldImageUrl !== finalImageUrl) {
+          await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+        }
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
     }
 
     // Handle slug generation
@@ -322,6 +377,11 @@ export class SubcategoryService {
       });
 
       if (conflicts) {
+        // Rollback image upload if there's a conflict
+        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
+          await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+        }
+        
         if (name && conflicts.name.toLowerCase() === name.toLowerCase()) {
           throw new ConflictException('Subcategory with this name already exists in this category');
         }
@@ -331,14 +391,18 @@ export class SubcategoryService {
       }
     }
 
+    // Build update data
+    const updateData: any = { ...rest };
+    if (name) updateData.name = name;
+    if (slug) updateData.slug = slug;
+    if (removeImage || finalImageUrl !== undefined) {
+      updateData.imageUrl = finalImageUrl;
+    }
+
     // Single database update - O(1)
     return this.prisma.subcategory.update({
       where: { id },
-      data: {
-        ...(name && { name }),
-        ...(slug && { slug }),
-        ...rest
-      }
+      data: updateData
     });
   }
 
@@ -357,6 +421,7 @@ export class SubcategoryService {
       select: {
         id: true,
         name: true,
+        imageUrl: true,
         _count: {
           select: {
             products: true
@@ -381,6 +446,11 @@ export class SubcategoryService {
       data: { isActive: false }
     });
 
+    // Optionally delete image (commented out for soft delete)
+    // if (subcategory.imageUrl && this.imageUploadService) {
+    //   await this.imageUploadService.deleteImage(subcategory.imageUrl).catch(() => {});
+    // }
+
     return { message: `Subcategory '${subcategory.name}' has been successfully deactivated` };
   }
 
@@ -394,6 +464,16 @@ export class SubcategoryService {
   ): Promise<{ updated: number }> {
     if (!categoryId || !Array.isArray(updates) || updates.length === 0) {
       throw new BadRequestException('Category ID and updates array are required');
+    }
+
+    // Validate input data
+    for (const update of updates) {
+      if (!update.id || typeof update.id !== 'string') {
+        throw new BadRequestException('Invalid subcategory ID in updates');
+      }
+      if (typeof update.sortOrder !== 'number' || update.sortOrder < 0) {
+        throw new BadRequestException('Sort order must be a non-negative number');
+      }
     }
 
     // Validate category exists and all subcategories belong to it - O(log n)

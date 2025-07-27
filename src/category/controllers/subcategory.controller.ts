@@ -12,7 +12,9 @@ import {
   HttpCode,
   HttpStatus,
   ParseUUIDPipe,
-  ValidationPipe
+  ValidationPipe,
+  UploadedFile,
+  UseInterceptors
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -27,8 +29,10 @@ import {
   ApiNotFoundResponse,
   ApiConflictResponse,
   ApiUnauthorizedResponse,
-  ApiForbiddenResponse
+  ApiForbiddenResponse,
+  ApiConsumes
 } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { SubcategoryService, SubcategoryWithCounts } from '../services/subcategory.service';
 import { CreateSubcategoryDto } from '../dto/create-subcategory.dto';
 import { UpdateSubcategoryDto } from '../dto/update-subcategory.dto';
@@ -43,11 +47,13 @@ export class SubcategoryController {
   constructor(private readonly subcategoryService: SubcategoryService) {}
 
   @Post()
+  @UseInterceptors(FileInterceptor('imageFile'))
+  @ApiConsumes('multipart/form-data')
   //@UseGuards(AdminGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Create a new subcategory',
-    description: 'Creates a new subcategory within a category with automatic slug generation. Admin access required.'
+    description: 'Creates a new subcategory within a category with automatic slug generation. Can accept either an image file or imageUrl. Admin access required.'
   })
   @ApiCreatedResponse({
     description: 'Subcategory created successfully',
@@ -67,10 +73,10 @@ export class SubcategoryController {
     }
   })
   @ApiBadRequestResponse({
-    description: 'Invalid input data',
+    description: 'Invalid input data or image upload failed',
     example: {
       statusCode: 400,
-      message: ['name should not be empty', 'categoryId must be a UUID'],
+      message: ['name should not be empty', 'categoryId must be a UUID', 'Image upload failed: Invalid file format'],
       error: 'Bad Request'
     }
   })
@@ -93,9 +99,10 @@ export class SubcategoryController {
   @ApiUnauthorizedResponse({ description: 'Authentication required' })
   @ApiForbiddenResponse({ description: 'Admin access required' })
   async create(
-    @Body(ValidationPipe) createSubcategoryDto: CreateSubcategoryDto
+    @Body(ValidationPipe) createSubcategoryDto: CreateSubcategoryDto,
+    @UploadedFile() imageFile?: Express.Multer.File
   ): Promise<Subcategory> {
-    return this.subcategoryService.create(createSubcategoryDto);
+    return this.subcategoryService.create(createSubcategoryDto, imageFile);
   }
 
   @Get()
@@ -208,11 +215,13 @@ export class SubcategoryController {
   }
 
   @Patch(':id')
+  @UseInterceptors(FileInterceptor('imageFile'))
+  @ApiConsumes('multipart/form-data')
   //@UseGuards(AdminGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Update subcategory',
-    description: 'Updates an existing subcategory. Slug is auto-generated if name changes. Admin access required.'
+    description: 'Updates an existing subcategory. Slug is auto-generated if name changes. Can accept image file or remove image. Admin access required.'
   })
   @ApiParam({
     name: 'id',
@@ -242,7 +251,7 @@ export class SubcategoryController {
     description: 'Invalid input data or UUID format',
     example: {
       statusCode: 400,
-      message: ['name must be a string'],
+      message: ['name must be a string', 'Image upload failed: Invalid file format'],
       error: 'Bad Request'
     }
   })
@@ -266,9 +275,14 @@ export class SubcategoryController {
   @ApiForbiddenResponse({ description: 'Admin access required' })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(ValidationPipe) updateSubcategoryDto: UpdateSubcategoryDto
+    @Body(ValidationPipe) updateSubcategoryDto: UpdateSubcategoryDto,
+    @UploadedFile() imageFile?: Express.Multer.File
   ): Promise<Subcategory> {
-    return this.subcategoryService.update(id, updateSubcategoryDto);
+    // Check for removeImage flag in the DTO
+    const removeImage =
+      (typeof updateSubcategoryDto.removeImage === 'string' && updateSubcategoryDto.removeImage === 'true') ||
+      (typeof updateSubcategoryDto.removeImage === 'boolean' && updateSubcategoryDto.removeImage === true);
+    return this.subcategoryService.update(id, updateSubcategoryDto, imageFile, removeImage);
   }
 
   @Delete(':id')
