@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary';
 import { CreateCategoryDto } from '../dto/create-category.dto';
 import { UpdateCategoryDto } from '../dto/update-category.dto';
 import { CategoryQueryDto } from '../dto/category-query.dto';
@@ -16,13 +17,19 @@ export interface CategoryWithCounts extends Category {
 
 @Injectable()
 export class CategoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cloudinaryService: CloudinaryService
+  ) {}
 
   /**
-   * Create a new category with optimized slug generation
+   * Create a new category with optimized slug generation and image upload
    * Time Complexity: O(log n) for unique checks + O(1) for creation
    */
-  async create(createCategoryDto: CreateCategoryDto): Promise<Category> {
+  async create(
+    createCategoryDto: CreateCategoryDto, 
+    imageFile?: Express.Multer.File
+  ): Promise<Category> {
     const { name, slug: providedSlug, ...rest } = createCategoryDto;
 
     // Generate or validate slug - O(1) operation
@@ -48,11 +55,25 @@ export class CategoryService {
       }
     }
 
+    // Handle image upload if provided
+    let imageUrl: string | undefined;
+    if (imageFile) {
+      try {
+        imageUrl = await this.cloudinaryService.uploadCategoryImage(
+          imageFile.buffer,
+          slug
+        );
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
+    }
+
     // Single database write - O(1)
     return this.prisma.category.create({
       data: {
         name,
         slug,
+        ...(imageUrl && { imageUrl }),
         ...rest
       }
     });
@@ -164,143 +185,15 @@ export class CategoryService {
   }
 
   /**
-   * Find category by ID with optimized includes
-   * Time Complexity: O(log n)
-   */
-  async findOne(
-    id: string, 
-    includeRelations: boolean = false
-  ): Promise<CategoryWithCounts> {
-    if (!id || typeof id !== 'string') {
-      throw new BadRequestException('Invalid category ID');
-    }
-
-    const select: Prisma.CategorySelect = {
-      id: true,
-      name: true,
-      slug: true,
-      description: true,
-      imageUrl: true,
-      metaTitle: true,
-      metaDescription: true,
-      sortOrder: true,
-      isActive: true,
-      createdAt: true,
-      updatedAt: true,
-      ...(includeRelations && {
-        subcategories: {
-          where: { isActive: true },
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            description: true,
-            imageUrl: true,
-            sortOrder: true,
-            isActive: true,
-            _count: {
-              select: { products: { where: { isActive: true } } }
-            }
-          },
-          orderBy: { sortOrder: 'asc' }
-        },
-        _count: {
-          select: {
-            products: { where: { isActive: true } },
-            subcategories: { where: { isActive: true } }
-          }
-        }
-      })
-    };
-
-    const category = await this.prisma.category.findUnique({
-      where: { id },
-      select
-    });
-
-    if (!category) {
-      throw new NotFoundException(`Category with ID ${id} not found`);
-    }
-
-    // Transform result if counts are included
-    if (includeRelations && '_count' in category) {
-      const { _count, subcategories, ...rest } = category;
-      return {
-        ...rest,
-        productCount: _count.products,
-        subcategoryCount: _count.subcategories,
-        subcategories: subcategories?.map(sub => ({
-          ...sub,
-          // productCount is not available since _count was not selected
-        }))
-      };
-    }
-
-    return category as CategoryWithCounts;
-  }
-
-  /**
-   * Find category by slug with caching optimization
-   * Time Complexity: O(log n)
-   */
-  async findBySlug(slug: string): Promise<CategoryWithCounts> {
-    if (!slug || typeof slug !== 'string') {
-      throw new BadRequestException('Invalid category slug');
-    }
-
-    const category = await this.prisma.category.findUnique({
-      where: { slug },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        imageUrl: true,
-        metaTitle: true,
-        metaDescription: true,
-        sortOrder: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true,
-        subcategories: {
-          where: { isActive: true },
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            description: true,
-            imageUrl: true,
-            sortOrder: true,
-            isActive: true
-          },
-          orderBy: { sortOrder: 'asc' }
-        },
-        _count: {
-          select: {
-            products: { where: { isActive: true } },
-            subcategories: { where: { isActive: true } }
-          }
-        }
-      }
-    });
-
-    if (!category) {
-      throw new NotFoundException(`Category with slug '${slug}' not found`);
-    }
-
-    const { _count, ...rest } = category;
-    return {
-      ...rest,
-      productCount: _count.products,
-      subcategoryCount: _count.subcategories
-    };
-  }
-
-  /**
-   * Update category with optimized conflict checking
+   * Update category with optimized conflict checking and image handling
    * Time Complexity: O(log n) for checks + O(1) for update
    */
-  async update(id: string, updateCategoryDto: UpdateCategoryDto): Promise<Category> {
+  async update(
+    id: string, 
+    updateCategoryDto: UpdateCategoryDto, 
+    imageFile?: Express.Multer.File,
+    removeImage?: boolean
+  ): Promise<Category> {
     if (!id || typeof id !== 'string') {
       throw new BadRequestException('Invalid category ID');
     }
@@ -310,7 +203,7 @@ export class CategoryService {
     // Check if category exists - O(1)
     const existingCategory = await this.prisma.category.findUnique({
       where: { id },
-      select: { id: true, name: true, slug: true }
+      select: { id: true, name: true, slug: true, imageUrl: true }
     });
 
     if (!existingCategory) {
@@ -347,19 +240,59 @@ export class CategoryService {
       }
     }
 
+    // Handle image operations
+    let imageUrl: string | undefined | null;
+    
+    if (removeImage) {
+      // Remove existing image from Cloudinary if it exists
+      if (existingCategory.imageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(existingCategory.imageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          // Log error but don't fail the update
+          console.warn(`Failed to delete image from Cloudinary: ${error.message}`);
+        }
+      }
+      imageUrl = null;
+    } else if (imageFile) {
+      // Upload new image
+      try {
+        const categorySlug = slug || existingCategory.slug;
+        imageUrl = await this.cloudinaryService.uploadCategoryImage(
+          imageFile.buffer,
+          categorySlug
+        );
+
+        // Delete old image if it exists and new upload was successful
+        if (existingCategory.imageUrl) {
+          try {
+            const oldPublicId = this.cloudinaryService.extractPublicId(existingCategory.imageUrl);
+            await this.cloudinaryService.deleteImage(oldPublicId);
+          } catch (error) {
+            // Log error but don't fail the update
+            console.warn(`Failed to delete old image from Cloudinary: ${error.message}`);
+          }
+        }
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
+    }
+
     // Single database update - O(1)
     return this.prisma.category.update({
       where: { id },
       data: {
         ...(name && { name }),
         ...(slug && { slug }),
+        ...(imageUrl !== undefined && { imageUrl }),
         ...rest
       }
     });
   }
 
   /**
-   * Soft delete category with cascade check
+   * Soft delete category with cascade check and image cleanup
    * Time Complexity: O(log n) for checks + O(1) for update
    */
   async remove(id: string): Promise<{ message: string }> {
@@ -373,6 +306,7 @@ export class CategoryService {
       select: {
         id: true,
         name: true,
+        imageUrl: true,
         _count: {
           select: {
             subcategories: true,
@@ -407,9 +341,116 @@ export class CategoryService {
 
     return { message: `Category '${category.name}' has been successfully deactivated` };
   }
+       // Add to CategoryService
+  async findBySlug(slug: string): Promise<CategoryWithCounts> {
+    const category = await this.prisma.category.findUnique({
+      where: { slug, isActive: true },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        description: true,
+        imageUrl: true,
+        metaTitle: true,
+        metaDescription: true,
+        sortOrder: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+        subcategories: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            description: true,
+            imageUrl: true,
+            sortOrder: true,
+            isActive: true
+          },
+          orderBy: { sortOrder: 'asc' }
+        },
+      _count: {
+          select: {
+          products: { where: { isActive: true } },
+          subcategories: { where: { isActive: true } }
+        }
+      }
+    }
+  });
+
+  if (!category) {
+    throw new NotFoundException(`Category with slug '${slug}' not found`);
+  }
+
+  // Transform _count to productCount and subcategoryCount
+  const { _count, ...rest } = category as any;
+  return {
+    ...rest,
+    productCount: _count?.products ?? 0,
+    subcategoryCount: _count?.subcategories ?? 0
+  };
+}
+
+async findOne(id: string, includeRelations = false): Promise<CategoryWithCounts> {
+  const select: Prisma.CategorySelect = {
+    id: true,
+    name: true,
+    slug: true,
+    description: true,
+    imageUrl: true,
+    metaTitle: true,
+    metaDescription: true,
+    sortOrder: true,
+    isActive: true,
+    createdAt: true,
+    updatedAt: true,
+    ...(includeRelations && {
+      subcategories: {
+        where: { isActive: true },
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          description: true,
+          imageUrl: true,
+          sortOrder: true,
+          isActive: true
+        },
+        orderBy: { sortOrder: 'asc' }
+      },
+      _count: {
+        select: {
+          products: { where: { isActive: true } },
+          subcategories: { where: { isActive: true } }
+        }
+      }
+    })
+  };
+
+  const category = await this.prisma.category.findUnique({
+    where: { id },
+    select
+  });
+
+  if (!category) {
+    throw new NotFoundException(`Category with ID ${id} not found`);
+  }
+
+  if (includeRelations && '_count' in category) {
+    const { _count, ...rest } = category as any;
+    return {
+      ...rest,
+      productCount: _count?.products ?? 0,
+      subcategoryCount: _count?.subcategories ?? 0
+    };
+  }
+
+  return category as CategoryWithCounts;
+}
 
   /**
-   * Hard delete category (admin only)
+   * Hard delete category with image cleanup
    * Time Complexity: O(1)
    */
   async hardDelete(id: string): Promise<{ message: string }> {
@@ -419,11 +460,22 @@ export class CategoryService {
 
     const category = await this.prisma.category.findUnique({
       where: { id },
-      select: { name: true }
+      select: { name: true, imageUrl: true }
     });
 
     if (!category) {
       throw new NotFoundException(`Category with ID ${id} not found`);
+    }
+
+    // Delete image from Cloudinary if it exists
+    if (category.imageUrl) {
+      try {
+        const publicId = this.cloudinaryService.extractPublicId(category.imageUrl);
+        await this.cloudinaryService.deleteImage(publicId);
+      } catch (error) {
+        // Log error but don't fail the deletion
+        console.warn(`Failed to delete image from Cloudinary: ${error.message}`);
+      }
     }
 
     await this.prisma.category.delete({

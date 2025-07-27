@@ -12,7 +12,9 @@ import {
   HttpCode,
   HttpStatus,
   ParseUUIDPipe,
-  ValidationPipe
+  ValidationPipe,
+  UploadedFile,
+  UseInterceptors
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -27,7 +29,8 @@ import {
   ApiNotFoundResponse,
   ApiConflictResponse,
   ApiUnauthorizedResponse,
-  ApiForbiddenResponse
+  ApiForbiddenResponse,
+  ApiConsumes
 } from '@nestjs/swagger';
 import { CategoryService, CategoryWithCounts } from '../services/category.service';
 import { CreateCategoryDto } from '../dto/create-category.dto';
@@ -36,74 +39,32 @@ import { CategoryQueryDto } from '../dto/category-query.dto';
 import { PaginatedResponseDto } from '../../common/dto/response.dto';
 //import { AdminGuard } from '../../common/decorator/admin-only.decorator';
 import { Category } from '@prisma/client';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 @ApiTags('Categories')
-@Controller('api/categories')
+@Controller('categories')
 export class CategoryController {
   constructor(private readonly categoryService: CategoryService) {}
 
   @Post()
-  //@UseGuards(AdminGuard)
-  @ApiBearerAuth()
+  @UseInterceptors(FileInterceptor('imageFile'))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary: 'Create a new category',
-    description: 'Creates a new category with automatic slug generation. Admin access required.'
+    description: 'Creates a new category with automatic slug generation. Can accept either an image file or imageUrl.'
   })
   @ApiCreatedResponse({
     description: 'Category created successfully',
-    type: CreateCategoryDto,
-    example: {
-      id: 'uuid-string',
-      name: 'Electronics',
-      slug: 'electronics',
-      description: 'Electronic devices and accessories',
-      imageUrl: 'https://example.com/electronics.jpg',
-      metaTitle: 'Electronics - Shop Now',
-      metaDescription: 'Browse our wide selection of electronic devices',
-      sortOrder: 1,
-      isActive: true,
-      createdAt: '2024-01-15T10:30:00Z',
-      updatedAt: '2024-01-15T10:30:00Z'
-    }
-  })
-  @ApiBadRequestResponse({
-    description: 'Invalid input data',
-    example: {
-      statusCode: 400,
-      message: ['name should not be empty', 'name must be a string'],
-      error: 'Bad Request'
-    }
-  })
-  @ApiConflictResponse({
-    description: 'Category with this name or slug already exists',
-    example: {
-      statusCode: 409,
-      message: 'Category with this name already exists',
-      error: 'Conflict'
-    }
-  })
-  @ApiUnauthorizedResponse({
-    description: 'Authentication required',
-    example: {
-      statusCode: 401,
-      message: 'Unauthorized',
-      error: 'Unauthorized'
-    }
-  })
-  @ApiForbiddenResponse({
-    description: 'Admin access required',
-    example: {
-      statusCode: 403,
-      message: 'Admin access required',
-      error: 'Forbidden'
-    }
+    type: CreateCategoryDto
   })
   async create(
-    @Body(ValidationPipe) createCategoryDto: CreateCategoryDto
+    @Body(ValidationPipe) createCategoryDto: CreateCategoryDto,
+    @UploadedFile() imageFile?: Express.Multer.File
   ): Promise<Category> {
-    return this.categoryService.create(createCategoryDto);
+    return this.categoryService.create(createCategoryDto, imageFile);
   }
 
+  
   @Get()
   @ApiOperation({
     summary: 'Get all categories with pagination and filtering',

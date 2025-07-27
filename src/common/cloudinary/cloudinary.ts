@@ -9,7 +9,7 @@ interface CloudinaryUploadOptions {
   height?: number;
   crop?: string;
   quality?: string | number;
-  format?: string;
+  fetch_format?: string;
   public_id?: string;
   overwrite?: boolean;
   transformation?: any[];
@@ -45,7 +45,7 @@ export class CloudinaryService {
       const defaultOptions: CloudinaryUploadOptions = {
         folder: 'lawrose',
         quality: 'auto',
-        format: 'auto',
+        fetch_format: 'auto',
         crop: 'limit',
         ...options,
       };
@@ -138,13 +138,22 @@ export class CloudinaryService {
       // Extract public ID from Cloudinary URL
       // Example: https://res.cloudinary.com/demo/image/upload/v1234567890/sample.jpg
       const parts = url.split('/');
-      const filename = parts[parts.length - 1];
-      const publicId = filename.split('.')[0];
+      const uploadIndex = parts.findIndex(part => part === 'upload');
       
-      // Handle versioned URLs (remove version prefix)
-      return publicId.startsWith('v') && publicId.length > 10 
-        ? parts[parts.length - 2] + '/' + publicId 
-        : publicId;
+      if (uploadIndex === -1) {
+        throw new Error('Invalid Cloudinary URL format');
+      }
+
+      // Get everything after 'upload' and before the file extension
+      const pathAfterUpload = parts.slice(uploadIndex + 1).join('/');
+      
+      // Remove version number if present (starts with 'v' followed by numbers)
+      const withoutVersion = pathAfterUpload.replace(/^v\d+\//, '');
+      
+      // Remove file extension
+      const publicId = withoutVersion.replace(/\.[^/.]+$/, '');
+      
+      return publicId;
     } catch (error) {
       throw new BadRequestException(`Invalid Cloudinary URL: ${url}`);
     }
@@ -160,7 +169,7 @@ export class CloudinaryService {
     try {
       return cloudinary.url(publicId, {
         transformation: [
-          { quality: 'auto', format: 'auto' },
+          { quality: 'auto', fetch_format: 'auto' },
           ...transformations,
         ],
       });
@@ -196,7 +205,7 @@ export class CloudinaryService {
       crop: 'fill',
       gravity: 'center',
       quality: 'auto:good',
-      format: 'auto',
+      fetch_format: 'auto',
     });
   }
 
@@ -219,7 +228,7 @@ export class CloudinaryService {
       crop: 'fill',
       gravity: 'center',
       quality: 'auto:good',
-      format: 'auto',
+      fetch_format: 'auto',
     });
   }
 }

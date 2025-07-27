@@ -33,7 +33,14 @@ export class CreateCategoryDto {
     description?: string;
 
     @ApiPropertyOptional({
-        description: 'Category image URL',
+        description: 'Category image file',
+        type: 'string',
+        format: 'binary'
+    })
+    imageFile?: any;
+
+    @ApiPropertyOptional({
+        description: 'Category image URL (alternative to file upload)',
         example: 'https://res.cloudinary.com/your-cloud/image/upload/v1234567890/categories/mens-clothing.jpg'
     })
     @IsUrl({}, { message: 'Invalid image URL format' })

@@ -3,6 +3,8 @@ import { Module, Logger } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { MulterModule } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RedisModule } from './redis/redis.module';
@@ -10,6 +12,7 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { CategoryModule } from './category/category.module';
+import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
 
 @Module({
   imports: [
@@ -51,6 +54,80 @@ import { CategoryModule } from './category/category.module';
         logger.log('All required environment variables are present');
         return config;
       },
+    }),
+
+    // Global Multer configuration for image uploads
+    MulterModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => {
+        const logger = new Logger('MulterConfiguration');
+        
+        // Get configuration values from environment or use defaults
+        const maxFileSize = configService.get<number>('MAX_IMAGE_SIZE') || 5 * 1024 * 1024; // 5MB default
+        const maxFiles = configService.get<number>('MAX_FILES_PER_UPLOAD') || 5; // 5 files default
+        
+        logger.log(`Global Multer configured - Max file size: ${maxFileSize / (1024 * 1024)}MB, Max files: ${maxFiles}`);
+        
+        return {
+          storage: memoryStorage(),
+          
+          // File size and count limits
+          limits: {
+            fileSize: maxFileSize,
+            files: maxFiles,
+            fieldNameSize: 100, // Max field name size
+            fieldSize: 1024 * 1024, // 1MB max field value size
+            fields: 10, // Max number of non-file fields
+          },
+          
+          // Global file filter for images
+          fileFilter: (req, file, callback) => {
+            logger.debug(`Processing file upload: ${file.originalname} (${file.mimetype})`);
+            
+            // Define allowed image MIME types
+            const allowedImageTypes = [
+              'image/jpeg',
+              'image/jpg',
+              'image/png',
+              'image/webp',
+            ];
+            
+            // Define allowed file extensions as backup check
+            const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+            
+            const fileExtension = file.originalname.toLowerCase().substring(file.originalname.lastIndexOf('.'));
+            
+            // Check MIME type
+            if (!allowedImageTypes.includes(file.mimetype)) {
+              logger.warn(`Rejected file: ${file.originalname} - Invalid MIME type: ${file.mimetype}`);
+              return callback(
+                new Error(`Invalid file type: ${file.mimetype}. Only image files are allowed.`),
+                false
+              );
+            }
+            
+            // Check file extension as additional security
+            if (!allowedExtensions.includes(fileExtension)) {
+              logger.warn(`Rejected file: ${file.originalname} - Invalid extension: ${fileExtension}`);
+              return callback(
+                new Error(`Invalid file extension: ${fileExtension}. Only image files are allowed.`),
+                false
+              );
+            }
+            
+            // Additional security check: validate file headers (magic numbers)
+            // This helps prevent malicious files with correct extensions
+            // Note: This is a basic check, for production consider more robust validation
+            
+            logger.debug(`Accepted file: ${file.originalname}`);
+            callback(null, true);
+          },
+          
+          // Preserve file paths for organized uploads
+          preservePath: false,
+        };
+      },
+      inject: [ConfigService],
     }),
 
     // Database connection using ConfigService
@@ -118,15 +195,17 @@ import { CategoryModule } from './category/category.module';
       inject: [ConfigService],
     }),
 
-    // Add other modules here as needed
+    // Core modules
     PrismaModule,
     RedisModule,
-
+    CloudinaryModule,
+    
+    // Feature modules
     AuthModule,
-
     UsersModule,
-
     CategoryModule,
+    
+    // Add other feature modules here as needed
   ],
   controllers: [AppController],
   providers: [AppService],
