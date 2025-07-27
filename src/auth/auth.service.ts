@@ -24,12 +24,28 @@ import {
   BasicResponse,
   RefreshTokenResponse 
 } from '../interfaces/auth-response.interface';
-//import { GoogleUser } from './types/auth.types';
 import { UserRole } from '@prisma/client';
 import { AdminRegisterDto } from '../auth/dto/admin.reg.dto';
 import { AdminLoginDto } from '../auth/dto/admin.login.dto';
 
+interface CreateUserData {
+  email: string;
+  fullName: string;
+  password?: string;
+  phoneNumber?: string;
+  role?: UserRole;
+  emailVerified?: boolean;
+  provider?: AuthProvider;
+  isActive?: boolean;
+  googleId?: string;
+  avatarUrl?: string;
+}
 
+interface ValidateCredentialsOptions {
+  requireAdminRole?: boolean;
+  requireAdminSecret?: boolean;
+  adminSecretKey?: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -42,66 +58,269 @@ export class AuthService {
     private emailService: EmailService,
   ) {}
 
+  /**
+   * Centralized user existence checker
+   */
+  private async checkUserExists(email: string): Promise<{ 
+    exists: boolean; 
+    user?: any; 
+    isAdmin?: boolean; 
+  }> {
+    const existingUser = await this.prisma.user.findUnique({
+      where: { email },
+      select: { 
+        id: true, 
+        role: true, 
+        email: true,
+        fullName: true,
+        password: true,
+        emailVerified: true,
+        isActive: true,
+        provider: true,
+        googleId: true,
+        avatarUrl: true,
+      },
+    });
+
+    if (!existingUser) {
+      return { exists: false };
+    }
+
+    return {
+      exists: true,
+      user: existingUser,
+      isAdmin: existingUser.role === 'ADMIN',
+    };
+  }
+
+  /**
+   * Centralized admin secret validation
+   */
+  private validateAdminSecret(adminSecretKey: string): void {
+    const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
+    if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
+      throw new UnauthorizedException('Invalid admin secret key. Access denied.');
+    }
+  }
+
+  /**
+   * Centralized credential validation
+   */
+  private async validateCredentials(
+    email: string, 
+    password: string, 
+    options: ValidateCredentialsOptions = {}
+  ): Promise<any> {
+    const { requireAdminRole, requireAdminSecret, adminSecretKey } = options;
+
+    // Validate admin secret if required
+    if (requireAdminSecret && adminSecretKey) {
+      this.validateAdminSecret(adminSecretKey);
+    }
+
+    const { exists, user } = await this.checkUserExists(email);
+    
+    if (!exists || !user) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Check admin role requirement
+    if (requireAdminRole && user.role !== 'ADMIN') {
+      throw new UnauthorizedException('Access denied. Admin privileges required.');
+    }
+
+    // Check account status
+    if (!user.isActive) {
+      const accountType = requireAdminRole ? 'Admin' : 'User';
+      throw new UnauthorizedException(`${accountType} account has been deactivated`);
+    }
+
+    // Validate password
+    if (!user.password) {
+      if (user.provider === AuthProvider.GOOGLE) {
+        throw new UnauthorizedException('This account was created with Google. Please login with Google.');
+      }
+      throw new UnauthorizedException('Invalid account configuration');
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Check email verification for regular users
+    if (!requireAdminRole && !user.emailVerified) {
+      throw new UnauthorizedException('Please verify your email before logging in');
+    }
+
+    return user;
+  }
+
+  /**
+   * Centralized user creation
+   */
+  private async createUser(userData: CreateUserData): Promise<any> {
+    const {
+      email,
+      fullName,
+      password,
+      phoneNumber,
+      role = UserRole.CUSTOMER,
+      emailVerified = false,
+      provider = AuthProvider.TRADITIONAL,
+      isActive = true,
+      googleId,
+      avatarUrl,
+    } = userData;
+
+    const createData: any = {
+      email,
+      fullName,
+      role,
+      emailVerified,
+      provider,
+      isActive,
+      phoneNumber,
+      googleId,
+      avatarUrl,
+    };
+
+    // Handle password hashing
+    if (password) {
+      createData.password = await bcrypt.hash(password, 12);
+    }
+
+    // Handle email verification for traditional users
+    if (provider === AuthProvider.TRADITIONAL && !emailVerified) {
+      const emailVerificationToken = crypto.randomBytes(32).toString('hex');
+      const emailVerificationExpires = new Date();
+      emailVerificationExpires.setHours(emailVerificationExpires.getHours() + 24);
+      
+      createData.emailVerificationToken = emailVerificationToken;
+      createData.emailVerificationExpires = emailVerificationExpires;
+    }
+
+    // Set last login for active accounts
+    if (isActive && emailVerified) {
+      createData.lastLoginAt = new Date();
+    }
+
+    return this.prisma.user.create({
+      data: createData,
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        emailVerified: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+        avatarUrl: true,
+        googleId: true,
+        provider: true,
+      },
+    });
+  }
+
+  /**
+   * Centralized authentication response builder
+   */
+  private async buildAuthResponse(
+    user: any,
+    message: string,
+    includeTokens: boolean = true
+  ): Promise<AuthResponse> {
+    let tokens: TokenResponse = { accessToken: '', refreshToken: '' };
+
+    if (includeTokens) {
+      tokens = await this.generateTokens({
+        sub: user.id,
+        email: user.email,
+        role: user.role,
+      }, user.id);
+
+      // Update last login
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() },
+      });
+    }
+
+    return {
+      success: true,
+      message,
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.fullName,
+          role: user.role,
+          emailVerified: user.emailVerified,
+          //avatarUrl: user.avatarUrl,
+        },
+        ...(includeTokens && tokens),
+      },
+    };
+  }
+
+  /**
+   * Centralized email sending with error handling
+   */
+  private async sendEmailSafely(
+    emailType: 'verification' | 'passwordReset',
+    email: string,
+    token: string,
+    fullName: string
+  ): Promise<boolean> {
+    try {
+      const emailSent = emailType === 'verification' 
+        ? await this.emailService.sendVerificationEmail(email, token, fullName)
+        : await this.emailService.sendPasswordResetEmail(email, token, fullName);
+      
+      if (emailSent) {
+        this.logger.log(`${emailType} email sent successfully to: ${email}`);
+        return true;
+      } else {
+        this.logger.warn(`${emailType} email failed to send to: ${email}`);
+        return false;
+      }
+    } catch (emailError) {
+      this.logger.error(`${emailType} email service failed for: ${email}`, emailError.stack);
+      return false;
+    }
+  }
+
+  // ===========================================
+  // PUBLIC METHODS (Refactored using DRY principles)
+  // ===========================================
+
   async register(registerDto: RegisterDto): Promise<{ success: boolean; message: string; data: { user: UserResponse } }> {
     const { email, password, fullName, phoneNumber } = registerDto;
 
     try {
       // Check if user exists
-      const existingUser = await this.prisma.user.findUnique({
-        where: { email },
-        select: { id: true },
-      });
-
-      if (existingUser) {
+      const { exists } = await this.checkUserExists(email);
+      if (exists) {
         throw new ConflictException('User with this email already exists');
       }
 
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 12);
-
-      // Generate email verification token
-      const emailVerificationToken = crypto.randomBytes(32).toString('hex');
-      const emailVerificationExpires = new Date();
-      emailVerificationExpires.setHours(emailVerificationExpires.getHours() + 24);
-
       // Create user
-      const user = await this.prisma.user.create({
-        data: {
-          email,
-          fullName,
-          password: hashedPassword,
-          phoneNumber,
-          emailVerificationToken,
-          emailVerificationExpires,
-          provider: AuthProvider.TRADITIONAL,
-        },
-        select: {
-          id: true,
-          email: true,
-          fullName: true,
-          emailVerified: true,
-          role: true,
-          createdAt: true,
-        },
+      const user = await this.createUser({
+        email,
+        password,
+        fullName,
+        phoneNumber,
+        role: UserRole.CUSTOMER,
+        emailVerified: false,
+        provider: AuthProvider.TRADITIONAL,
       });
 
-      // Try to send verification email, but don't fail registration if email fails
-      try {
-        const emailSent = await this.emailService.sendVerificationEmail(
-          email,
-          emailVerificationToken,
-          fullName,
-        );
-        
-        if (emailSent) {
-          this.logger.log(`User registered successfully and verification email sent: ${email}`);
-        } else {
-          this.logger.warn(`User registered successfully but verification email failed: ${email}`);
-        }
-      } catch (emailError) {
-        this.logger.error(`User registered successfully but email service failed for: ${email}`, emailError.stack);
-        // Continue with registration success even if email fails
+      // Send verification email safely
+      if (user.emailVerificationToken) {
+        await this.sendEmailSafely('verification', email, user.emailVerificationToken, fullName);
       }
+
+      this.logger.log(`User registered successfully: ${email}`);
 
       return {
         success: true,
@@ -114,168 +333,67 @@ export class AuthService {
     }
   }
 
-/**
- * Admin Registration
- * Creates an admin account with secret key validation
- */
+  /**
+   * Admin Registration
+   * Creates an admin account with secret key validation
+   */
   async adminRegister(adminRegisterDto: AdminRegisterDto): Promise<AuthResponse> {
     const { email, password, fullName, phoneNumber, adminSecretKey } = adminRegisterDto;
 
     try {
-      // Validate admin secret key
-      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
-      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
-        throw new UnauthorizedException('Invalid admin secret key. Access denied.');
+      // Validate admin secret
+      this.validateAdminSecret(adminSecretKey);
+
+      // Check if user exists
+      const { exists, isAdmin } = await this.checkUserExists(email);
+      if (exists) {
+        const errorMessage = isAdmin 
+          ? 'Admin with this email already exists'
+          : 'User with this email already exists as a customer';
+        throw new ConflictException(errorMessage);
       }
-
-      // Check if admin already exists
-      const existingAdmin = await this.prisma.user.findUnique({
-        where: { email },
-        select: { id: true, role: true },
-      });
-
-      if (existingAdmin) {
-          if (existingAdmin.role === 'ADMIN') {
-            throw new ConflictException('Admin with this email already exists');
-        } else {
-          throw new ConflictException('User with this email already exists as a customer');
-        }
-      }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 12);
 
       // Create admin user
-      const admin = await this.prisma.user.create({
-        data: {
-          email,
-          fullName,
-          password: hashedPassword,
-          phoneNumber,
-          role: 'ADMIN',
-          emailVerified: true, // Admins are auto-verified
-          provider: AuthProvider.TRADITIONAL,
-          isActive: true,
-          lastLoginAt: new Date(),
-        },
-        select: {
-          id: true,
-          email: true,
-          fullName: true,
-          role: true,
-          emailVerified: true,
-          isActive: true,
-          createdAt: true,
-        },
+      const admin = await this.createUser({
+        email,
+        password,
+        fullName,
+        phoneNumber,
+        role: UserRole.ADMIN,
+        emailVerified: true, // Admins are auto-verified
+        provider: AuthProvider.TRADITIONAL,
+        isActive: true,
       });
 
-      // Generate tokens for immediate login
-      const { accessToken, refreshToken } = await this.generateTokens({
-        sub: admin.id,
-        email: admin.email,
-        role: admin.role,
-      }, admin.id);
+      this.logger.log(`Admin account created successfully: ${email}`);
 
-      this.logger.log(`Admin account created and logged in successfully: ${email}`);
-
-      return {
-        success: true,
-        message: 'Admin account created successfully. You are now logged in.',
-        data: {
-          user: admin,
-          accessToken,
-          refreshToken,
-        },
-      };
+      return this.buildAuthResponse(
+        admin, 
+        'Admin account created successfully. You are now logged in.'
+      );
     } catch (error) {
       this.logger.error(`Admin registration failed for email: ${email}`, error.stack);
       throw error;
     }
   }
 
-/**
- * Admin Login
- * Authenticates admin users with secret key validation
- */
+  /**
+   * Admin Login
+   * Authenticates admin users with secret key validation
+   */
   async adminLogin(adminLoginDto: AdminLoginDto): Promise<AuthResponse> {
     const { email, password, adminSecretKey } = adminLoginDto;
 
     try {
-      // Validate admin secret key
-      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
-      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
-        throw new UnauthorizedException('Invalid admin secret key. Access denied.');
-      }
-
-      // Find admin user
-      const admin = await this.prisma.user.findUnique({
-        where: { email },
-        select: {
-          id: true,
-          email: true,
-          fullName: true,
-          password: true,
-          role: true,
-          emailVerified: true,
-          isActive: true,
-          provider: true,
-        },
-      });
-
-      if (!admin) {
-        throw new UnauthorizedException('Invalid credentials or admin not found');
-      }
-
-      // Check if user is actually an admin
-      if (admin.role !== 'ADMIN') {
-        throw new UnauthorizedException('Access denied. Admin privileges required.');
-      }
-
-      // Check if account is active
-      if (!admin.isActive) {
-        throw new UnauthorizedException('Admin account has been deactivated');
-      }
-
-      // Validate password
-      if (!admin.password) {
-        throw new UnauthorizedException('Invalid admin account configuration');
-      }
-
-      const isPasswordValid = await bcrypt.compare(password, admin.password);
-      if (!isPasswordValid) {
-        throw new UnauthorizedException('Invalid credentials');
-      }
-
-      // Generate tokens
-      const { accessToken, refreshToken } = await this.generateTokens({
-        sub: admin.id,
-        email: admin.email,
-        role: admin.role,
-      }, admin.id);
-
-      // Update last login
-      await this.prisma.user.update({
-        where: { id: admin.id },
-        data: { lastLoginAt: new Date() },
+      const admin = await this.validateCredentials(email, password, {
+        requireAdminRole: true,
+        requireAdminSecret: true,
+        adminSecretKey,
       });
 
       this.logger.log(`Admin logged in successfully: ${email}`);
 
-      return {
-        success: true,
-        message: 'Admin login successful',
-        data: {
-          user: {
-            id: admin.id,
-            email: admin.email,
-            fullName: admin.fullName,
-            role: admin.role,
-            emailVerified: admin.emailVerified,
-          },
-          accessToken,
-          refreshToken,
-        },
-      };
+      return this.buildAuthResponse(admin, 'Admin login successful');
     } catch (error) {
       this.logger.error(`Admin login failed for email: ${email}`, error.stack);
       throw error;
@@ -283,54 +401,60 @@ export class AuthService {
   }
 
   /**
-  * Validate Admin User (for guards)
-  * Similar to validateUser but specifically for admin authentication
-  */
+   * Validate Admin User (for guards)
+   * Similar to validateUser but specifically for admin authentication
+   */
   async validateAdminUser(email: string, password: string, adminSecretKey: string) {
     try {
-      // Validate admin secret key first
-      const validAdminSecret = this.configService.get('ADMIN_CREATION_SECRET');
-      if (!validAdminSecret || adminSecretKey !== validAdminSecret) {
-        return null;
-      }
-
-      const admin = await this.prisma.user.findUnique({
-        where: { email },
-        select: {
-          id: true,
-          email: true,
-          fullName: true,
-          password: true,
-          role: true,
-          emailVerified: true,
-          isActive: true,
-          provider: true,
-        },
+      const admin = await this.validateCredentials(email, password, {
+        requireAdminRole: true,
+        requireAdminSecret: true,
+        adminSecretKey,
       });
-
-      if (!admin || !admin.password || admin.role !== 'ADMIN') {
-        return null;
-      }
-
-    const isPasswordValid = await bcrypt.compare(password, admin.password);
-      if (!isPasswordValid) {
-        return null;
-      }
-
-      if (!admin.isActive) {
-        throw new UnauthorizedException('Admin account has been deactivated');
-      }
 
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { password: _, ...result } = admin;
       return result;
     } catch (error) {
       this.logger.error(`Admin validation failed for email: ${email}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Regular user validation (for guards)
+   */
+  async validateUser(email: string, password: string) {
+    try {
+      const user = await this.validateCredentials(email, password, {
+        requireAdminRole: false,
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { password: _, ...result } = user;
+      return result;
+    } catch (error) {
+      this.logger.error(`User validation failed for email: ${email}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Regular user login
+   */
+  async login(user: any): Promise<AuthResponse> {
+    try {
+      this.logger.log(`User logged in successfully: ${user.email}`);
+      return this.buildAuthResponse(user, 'Login successful');
+    } catch (error) {
+      this.logger.error(`Login failed for user: ${user.email}`, error.stack);
       throw error;
     }
   }
 
-
+  // ===========================================
+  // GOOGLE OAUTH METHODS (Unchanged but optimized)
+  // ===========================================
 
   /**
    * Google OAuth Authentication
@@ -411,62 +535,34 @@ export class AuthService {
           this.logger.log(`Existing Google user logged in: ${email}`);
         }
       } else {
-        // Create new user
-        user = await this.prisma.user.create({
-          data: {
-            email,
-            fullName,
-            googleId,
-            avatarUrl,
-            provider: AuthProvider.GOOGLE,
-            emailVerified: true, // Google accounts are pre-verified
-            lastLoginAt: new Date(),
-          },
-          select: {
-            id: true,
-            email: true,
-            fullName: true,
-            role: true,
-            emailVerified: true,
-            avatarUrl: true,
-            isActive: true,
-            googleId: true,
-            provider: true,
-          },
+        // Create new user using our centralized method
+        user = await this.createUser({
+          email,
+          fullName,
+          googleId,
+          avatarUrl,
+          provider: AuthProvider.GOOGLE,
+          emailVerified: true,
+          role: UserRole.CUSTOMER,
         });
 
         this.logger.log(`New Google user registered: ${email}`);
       }
 
-      // Generate tokens
-      const { accessToken, refreshToken } = await this.generateTokens({
-        sub: user.id,
-        email: user.email,
-        role: user.role,
-      }, user.id);
-
-      return {
-        success: true,
-        message: user.googleId ? 'Google login successful' : 'Google account created and logged in successfully',
-        data: {
-          user,
-          accessToken,
-          refreshToken,
-        },
-      };
+      const message = user.googleId ? 'Google login successful' : 'Google account created and logged in successfully';
+      return this.buildAuthResponse(user, message);
     } catch (error) {
       this.logger.error(`Google auth failed for email: ${email}`, error.stack);
       throw new InternalServerErrorException('Google authentication failed');
     }
   }
 
-  /*
-      * Validate Google user
-      * This method is called by the GoogleStrategy to validate the user
-  */
-
-    async validateGoogleUser(googleUser: any) {
-      try {
+  /**
+   * Validate Google user
+   * This method is called by the GoogleStrategy to validate the user
+   */
+  async validateGoogleUser(googleUser: any) {
+    try {
       // Check if user already exists
       let user = await this.prisma.user.findUnique({
         where: { email: googleUser.email },
@@ -485,79 +581,34 @@ export class AuthService {
           },
         });
       } else {
-        // Create new user
-        user = await this.prisma.user.create({
-          data: {
-            email: googleUser.email,
-            fullName: googleUser.fullName,
-            avatarUrl: googleUser.picture,
-            emailVerified: true,
-            googleId: googleUser.id,
-            role: 'CUSTOMER', // Default role
-            // No password needed for Google OAuth users
-          },
+        // Create new user using our centralized method
+        user = await this.createUser({
+          email: googleUser.email,
+          fullName: googleUser.fullName,
+          avatarUrl: googleUser.picture,
+          googleId: googleUser.id,
+          emailVerified: true,
+          provider: AuthProvider.GOOGLE,
+          role: UserRole.CUSTOMER,
         });
       }
 
       return {
-      id: user.id,
-      email: user.email,
-      fullName: user.fullName,
-      role: user.role,
-      avatarUrl: user.avatarUrl,
-    };
-  } catch (error) {
-    console.error('Error validating Google user:', error);
-    throw new Error('Failed to validate Google user');
-  }
-}
-  /**
-   * Find user by Google ID
-   */
-  async findByGoogleId(googleId: string) {
-    return this.prisma.user.findFirst({
-      where: { googleId },
-    });
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        role: user.role,
+        avatarUrl: user.avatarUrl,
+      };
+    } catch (error) {
+      console.error('Error validating Google user:', error);
+      throw new Error('Failed to validate Google user');
+    }
   }
 
-  /**
-   * Create a new Google user
-   */
-  async createGoogleUser(data: {
-    googleId: string;
-    email: string;
-    fullName: string;
-    avatarUrl?: string;
-    provider: string;
-    role: string;
-    emailVerified: boolean;
-    createdAt: Date;
-    updatedAt: Date;
-  }) {
-    return this.prisma.user.create({
-      data: {
-        googleId: data.googleId,
-        email: data.email,
-        fullName: data.fullName,
-        avatarUrl: data.avatarUrl,
-        provider: data.provider as AuthProvider,
-        role: data.role as UserRole,
-        emailVerified: data.emailVerified,
-        createdAt: data.createdAt,
-        updatedAt: data.updatedAt,
-      },
-    });
-  }
-
-  /**
-   * Update user by ID
-   */
-  async updateUser(userId: string, data: any) {
-    return this.prisma.user.update({
-      where: { id: userId },
-      data,
-    });
-  }
+  // ===========================================
+  // UTILITY METHODS (Optimized existing methods)
+  // ===========================================
 
   async verifyEmail(token: string): Promise<AuthResponse> {
     try {
@@ -599,111 +650,14 @@ export class AuthService {
         },
       });
 
-      // Generate tokens
-      const { accessToken, refreshToken } = await this.generateTokens({
-        sub: updatedUser.id,
-        email: updatedUser.email,
-        role: updatedUser.role,
-      }, updatedUser.id);
-
       this.logger.log(`Email verified and user logged in: ${updatedUser.email}`);
 
-      return {
-        success: true,
-        message: 'Email verified successfully. You are now logged in.',
-        data: {
-          user: updatedUser,
-          accessToken,
-          refreshToken,
-        },
-      };
+      return this.buildAuthResponse(
+        updatedUser, 
+        'Email verified successfully. You are now logged in.'
+      );
     } catch (error) {
       this.logger.error(`Email verification failed for token: ${token}`, error.stack);
-      throw error;
-    }
-  }
-
-  async validateUser(email: string, password: string) {
-    try {
-      const user = await this.prisma.user.findUnique({
-        where: { email },
-        select: {
-          id: true,
-          email: true,
-          fullName: true,
-          password: true,
-          emailVerified: true,
-          isActive: true,
-          role: true,
-          provider: true,
-        },
-      });
-
-      if (!user || !user.password) {
-        return null;
-      }
-
-      // Check if user registered with Google
-      if (user.provider === AuthProvider.GOOGLE && !user.password) {
-        throw new UnauthorizedException('This account was created with Google. Please login with Google.');
-      }
-
-      const isPasswordValid = await bcrypt.compare(password, user.password);
-      if (!isPasswordValid) {
-        return null;
-      }
-
-      if (!user.emailVerified) {
-        throw new UnauthorizedException('Please verify your email before logging in');
-      }
-
-      if (!user.isActive) {
-        throw new UnauthorizedException('Your account has been deactivated');
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { password: _, ...result } = user;
-      return result;
-    } catch (error) {
-      this.logger.error(`User validation failed for email: ${email}`, error.stack);
-      throw error;
-    }
-  }
-
-  async login(user: any): Promise<AuthResponse> {
-    try {
-      // Generate tokens
-      const { accessToken, refreshToken } = await this.generateTokens({
-        sub: user.id,
-        email: user.email,
-        role: user.role,
-      }, user.id);
-
-      // Update last login
-      await this.prisma.user.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
-      });
-
-      this.logger.log(`User logged in successfully: ${user.email}`);
-
-      return {
-        success: true,
-        message: 'Login successful',
-        data: {
-          user: {
-            id: user.id,
-            email: user.email,
-            fullName: user.fullName,
-            role: user.role,
-            emailVerified: user.emailVerified,
-          },
-          accessToken,
-          refreshToken,
-        },
-      };
-    } catch (error) {
-      this.logger.error(`Login failed for user: ${user.email}`, error.stack);
       throw error;
     }
   }
@@ -793,11 +747,7 @@ export class AuthService {
         },
       });
 
-      await this.emailService.sendPasswordResetEmail(
-        email,
-        resetToken,
-        user.fullName,
-      );
+      await this.sendEmailSafely('passwordReset', email, resetToken, user.fullName);
 
       this.logger.log(`Password reset requested for email: ${email}`);
 
@@ -945,11 +895,7 @@ export class AuthService {
         },
       });
 
-      await this.emailService.sendVerificationEmail(
-        email,
-        emailVerificationToken,
-        user.fullName,
-      );
+      await this.sendEmailSafely('verification', email, emailVerificationToken, user.fullName);
 
       this.logger.log(`Verification email resent to: ${email}`);
 
@@ -961,6 +907,54 @@ export class AuthService {
       this.logger.error(`Resend verification email failed for: ${email}`, error.stack);
       throw error;
     }
+  }
+
+  // ===========================================
+  // EXISTING UTILITY METHODS (Unchanged)
+  // ===========================================
+
+  /**
+   * Find user by Google ID
+   */
+  async findByGoogleId(googleId: string) {
+    return this.prisma.user.findFirst({
+      where: { googleId },
+    });
+  }
+
+  /**
+   * Create a new Google user
+   */
+  async createGoogleUser(data: {
+    googleId: string;
+    email: string;
+    fullName: string;
+    avatarUrl?: string;
+    provider: string;
+    role: string;
+    emailVerified: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return this.createUser({
+      googleId: data.googleId,
+      email: data.email,
+      fullName: data.fullName,
+      avatarUrl: data.avatarUrl,
+      provider: data.provider as AuthProvider,
+      role: data.role as UserRole,
+      emailVerified: data.emailVerified,
+    });
+  }
+
+  /**
+   * Update user by ID
+   */
+  async updateUser(userId: string, data: any) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data,
+    });
   }
 
   /**

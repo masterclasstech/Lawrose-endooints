@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary';
 import { CreateSubcategoryDto } from '../dto/create-subcategory.dto';
 import { UpdateSubcategoryDto } from '../dto/update-subcategory.dto';
 import { SubcategoryQueryDto } from '../dto/subcategory-query.dto';
@@ -17,16 +18,11 @@ export interface SubcategoryWithCounts extends Subcategory {
   };
 }
 
-interface ImageUploadService {
-  uploadImage(file: Express.Multer.File, folder: string): Promise<string>;
-  deleteImage(imageUrl: string): Promise<void>;
-}
-
 @Injectable()
 export class SubcategoryService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly imageUploadService?: ImageUploadService
+    private readonly cloudinaryService: CloudinaryService
   ) {}
 
   /**
@@ -44,9 +40,20 @@ export class SubcategoryService {
 
     // Handle image upload first to fail fast if there's an issue
     let finalImageUrl = imageUrl;
-    if (imageFile && this.imageUploadService) {
+    if (imageFile) {
       try {
-        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'subcategories');
+        // Get category info for better folder organization
+        const category = await this.prisma.category.findUnique({
+          where: { id: categoryId },
+          select: { slug: true }
+        });
+        
+        const categorySlug = category?.slug || 'unknown';
+        finalImageUrl = await this.cloudinaryService.uploadSubcategoryImage(
+          imageFile.buffer, 
+          categorySlug, 
+          slug
+        );
       } catch (error) {
         throw new BadRequestException(`Image upload failed: ${error.message}`);
       }
@@ -72,16 +79,27 @@ export class SubcategoryService {
 
     if (!categoryExists) {
       // Clean up uploaded image if category doesn't exist
-      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
-        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      if (finalImageUrl && finalImageUrl !== imageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(finalImageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          // Log error but don't throw
+          console.error('Failed to cleanup image after category validation failure:', error);
+        }
       }
       throw new NotFoundException(`Category with ID ${categoryId} not found or inactive`);
     }
 
     if (existingSubcategory) {
       // Clean up uploaded image if there's a conflict
-      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
-        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      if (finalImageUrl && finalImageUrl !== imageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(finalImageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          console.error('Failed to cleanup image after conflict:', error);
+        }
       }
       
       if (existingSubcategory.name.toLowerCase() === name.toLowerCase()) {
@@ -326,7 +344,16 @@ export class SubcategoryService {
     // Check if subcategory exists - O(log n)
     const existingSubcategory = await this.prisma.subcategory.findUnique({
       where: { id },
-      select: { id: true, name: true, slug: true, categoryId: true, imageUrl: true }
+      select: { 
+        id: true, 
+        name: true, 
+        slug: true, 
+        categoryId: true, 
+        imageUrl: true,
+        category: {
+          select: { slug: true }
+        }
+      }
     });
 
     if (!existingSubcategory) {
@@ -340,15 +367,31 @@ export class SubcategoryService {
     if (removeImage) {
       finalImageUrl = null;
       // Delete old image if it exists
-      if (oldImageUrl && this.imageUploadService) {
-        await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+      if (oldImageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(oldImageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          console.error('Failed to delete old image:', error);
+        }
       }
-    } else if (imageFile && this.imageUploadService) {
+    } else if (imageFile) {
       try {
-        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'subcategories');
+        const categorySlug = existingSubcategory.category?.slug || 'unknown';
+        const subcategorySlug = providedSlug || existingSubcategory.slug;
+        finalImageUrl = await this.cloudinaryService.uploadSubcategoryImage(
+          imageFile.buffer, 
+          categorySlug, 
+          subcategorySlug
+        );
         // Delete old image after successful upload
         if (oldImageUrl && oldImageUrl !== finalImageUrl) {
-          await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+          try {
+            const publicId = this.cloudinaryService.extractPublicId(oldImageUrl);
+            await this.cloudinaryService.deleteImage(publicId);
+          } catch (error) {
+            console.error('Failed to delete old image:', error);
+          }
         }
       } catch (error) {
         throw new BadRequestException(`Image upload failed: ${error.message}`);
@@ -378,8 +421,13 @@ export class SubcategoryService {
 
       if (conflicts) {
         // Rollback image upload if there's a conflict
-        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
-          await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl) {
+          try {
+            const publicId = this.cloudinaryService.extractPublicId(finalImageUrl);
+            await this.cloudinaryService.deleteImage(publicId);
+          } catch (error) {
+            console.error('Failed to rollback image upload:', error);
+          }
         }
         
         if (name && conflicts.name.toLowerCase() === name.toLowerCase()) {
@@ -447,8 +495,13 @@ export class SubcategoryService {
     });
 
     // Optionally delete image (commented out for soft delete)
-    // if (subcategory.imageUrl && this.imageUploadService) {
-    //   await this.imageUploadService.deleteImage(subcategory.imageUrl).catch(() => {});
+    // if (subcategory.imageUrl) {
+    //   try {
+    //     const publicId = this.cloudinaryService.extractPublicId(subcategory.imageUrl);
+    //     await this.cloudinaryService.deleteImage(publicId);
+    //   } catch (error) {
+    //     console.error('Failed to delete image:', error);
+    //   }
     // }
 
     return { message: `Subcategory '${subcategory.name}' has been successfully deactivated` };

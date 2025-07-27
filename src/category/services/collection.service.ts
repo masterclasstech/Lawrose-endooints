@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary';
 import { CreateCollectionDto } from '../dto/create-collection.dto';
 import { UpdateCollectionDto } from '../dto/update-collection.dto';
 import { CollectionQueryDto } from '../dto/collection-query.dto';
@@ -13,16 +14,11 @@ export interface CollectionWithCounts extends Collection {
   products?: any[];
 }
 
-interface ImageUploadService {
-  uploadImage(file: Express.Multer.File, folder: string): Promise<string>;
-  deleteImage(imageUrl: string): Promise<void>;
-}
-
 @Injectable()
 export class CollectionService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly imageUploadService?: ImageUploadService
+    private readonly cloudinaryService: CloudinaryService
   ) {}
 
   /**
@@ -45,9 +41,17 @@ export class CollectionService {
 
     // Handle image upload first to fail fast if there's an issue
     let finalImageUrl = imageUrl;
-    if (imageFile && this.imageUploadService) {
+    if (imageFile) {
       try {
-        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'collections');
+        finalImageUrl = await this.cloudinaryService.uploadImage(imageFile.buffer, {
+          folder: 'lawrose/collections',
+          quality: 'auto:good',
+          fetch_format: 'auto',
+          width: 1200,
+          height: 800,
+          crop: 'fill',
+          gravity: 'center'
+        });
       } catch (error) {
         throw new BadRequestException(`Image upload failed: ${error.message}`);
       }
@@ -66,8 +70,13 @@ export class CollectionService {
 
     if (existingCollection) {
       // Clean up uploaded image if there's a conflict
-      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
-        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      if (finalImageUrl && finalImageUrl !== imageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(finalImageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          console.error('Failed to cleanup image after conflict:', error);
+        }
       }
 
       if (existingCollection.name.toLowerCase() === name.toLowerCase()) {
@@ -454,15 +463,33 @@ export class CollectionService {
     if (removeImage) {
       finalImageUrl = null;
       // Delete old image if it exists
-      if (oldImageUrl && this.imageUploadService) {
-        await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+      if (oldImageUrl) {
+        try {
+          const publicId = this.cloudinaryService.extractPublicId(oldImageUrl);
+          await this.cloudinaryService.deleteImage(publicId);
+        } catch (error) {
+          console.error('Failed to delete old image:', error);
+        }
       }
-    } else if (imageFile && this.imageUploadService) {
+    } else if (imageFile) {
       try {
-        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'collections');
+        finalImageUrl = await this.cloudinaryService.uploadImage(imageFile.buffer, {
+          folder: 'lawrose/collections',
+          quality: 'auto:good',
+          fetch_format: 'auto',
+          width: 1200,
+          height: 800,
+          crop: 'fill',
+          gravity: 'center'
+        });
         // Delete old image after successful upload
         if (oldImageUrl && oldImageUrl !== finalImageUrl) {
-          await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+          try {
+            const publicId = this.cloudinaryService.extractPublicId(oldImageUrl);
+            await this.cloudinaryService.deleteImage(publicId);
+          } catch (error) {
+            console.error('Failed to delete old image:', error);
+          }
         }
       } catch (error) {
         throw new BadRequestException(`Image upload failed: ${error.message}`);
@@ -491,8 +518,13 @@ export class CollectionService {
 
       if (conflicts) {
         // Rollback image upload if there's a conflict
-        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
-          await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl) {
+          try {
+            const publicId = this.cloudinaryService.extractPublicId(finalImageUrl);
+            await this.cloudinaryService.deleteImage(publicId);
+          } catch (error) {
+            console.error('Failed to rollback image upload:', error);
+          }
         }
         
         if (name && conflicts.name.toLowerCase() === name.toLowerCase()) {
@@ -562,8 +594,13 @@ export class CollectionService {
     });
 
     // Optionally delete image (commented out for soft delete)
-    // if (collection.imageUrl && this.imageUploadService) {
-    //   await this.imageUploadService.deleteImage(collection.imageUrl).catch(() => {});
+    // if (collection.imageUrl) {
+    //   try {
+    //     const publicId = this.cloudinaryService.extractPublicId(collection.imageUrl);
+    //     await this.cloudinaryService.deleteImage(publicId);
+    //   } catch (error) {
+    //     console.error('Failed to delete image:', error);
+    //   }
     // }
 
     return { message: `Collection '${collection.name}' has been successfully deactivated` };
@@ -593,8 +630,13 @@ export class CollectionService {
     });
 
     // Delete associated image
-    if (collection.imageUrl && this.imageUploadService) {
-      await this.imageUploadService.deleteImage(collection.imageUrl).catch(() => {});
+    if (collection.imageUrl) {
+      try {
+        const publicId = this.cloudinaryService.extractPublicId(collection.imageUrl);
+        await this.cloudinaryService.deleteImage(publicId);
+      } catch (error) {
+        console.error('Failed to delete image:', error);
+      }
     }
 
     return { message: `Collection '${collection.name}' has been permanently deleted` };
