@@ -2,12 +2,8 @@
 import { IsString, IsOptional, IsBoolean, IsInt, IsUrl, Length, Min, IsEnum, IsDateString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
+import { $Enums } from '@prisma/client';
 
-enum Season {
-    SPRING_SUMMER = 'SPRING_SUMMER',
-    AUTUMN_WINTER = 'AUTUMN_WINTER',
-    YEAR_ROUND = 'YEAR_ROUND'
-    }
 
 export class CreateCollectionDto {
     @ApiProperty({
@@ -55,14 +51,13 @@ export class CreateCollectionDto {
     @Type(() => Number)
     year: number;
 
-    @ApiPropertyOptional({
-        description: 'Collection season',
-        example: 'SPRING_SUMMER',
-        enum: Season
+    @ApiProperty({
+    description: 'Collection season',
+    enum: $Enums.Season,
+    example: 'SPRING_SUMMER'
     })
-    @IsEnum(Season, { message: 'Invalid season' })
-    @IsOptional()
-    season?: Season;
+    @IsEnum($Enums.Season)
+    season: $Enums.Season;
 
     @ApiPropertyOptional({
         description: 'Meta title for SEO',

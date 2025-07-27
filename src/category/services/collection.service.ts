@@ -10,18 +10,30 @@ import { Prisma, Collection, Season } from '@prisma/client';
 
 export interface CollectionWithCounts extends Collection {
   productCount?: number;
+  products?: any[];
+}
+
+interface ImageUploadService {
+  uploadImage(file: Express.Multer.File, folder: string): Promise<string>;
+  deleteImage(imageUrl: string): Promise<void>;
 }
 
 @Injectable()
 export class CollectionService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly imageUploadService?: ImageUploadService
+  ) {}
 
   /**
-   * Create a new collection with validation
+   * Create a new collection with image upload support and validation
    * Time Complexity: O(log n) for checks + O(1) for creation
    */
-  async create(createCollectionDto: CreateCollectionDto): Promise<Collection> {
-    const { name, slug: providedSlug, startDate, endDate, ...rest } = createCollectionDto;
+  async create(
+    createCollectionDto: CreateCollectionDto, 
+    imageFile?: Express.Multer.File
+  ): Promise<Collection> {
+    const { name, slug: providedSlug, startDate, endDate, imageUrl, ...rest } = createCollectionDto;
 
     // Validate date range - O(1)
     if (startDate && endDate && new Date(startDate) >= new Date(endDate)) {
@@ -30,6 +42,16 @@ export class CollectionService {
 
     // Generate slug - O(1)
     const slug = providedSlug || generateSlug(name);
+
+    // Handle image upload first to fail fast if there's an issue
+    let finalImageUrl = imageUrl;
+    if (imageFile && this.imageUploadService) {
+      try {
+        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'collections');
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
+    }
 
     // Check for existing collection with same name or slug - O(log n)
     const existingCollection = await this.prisma.collection.findFirst({
@@ -43,6 +65,11 @@ export class CollectionService {
     });
 
     if (existingCollection) {
+      // Clean up uploaded image if there's a conflict
+      if (finalImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
+        await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+      }
+
       if (existingCollection.name.toLowerCase() === name.toLowerCase()) {
         throw new ConflictException('Collection with this name already exists');
       }
@@ -56,6 +83,7 @@ export class CollectionService {
       data: {
         name,
         slug,
+        imageUrl: finalImageUrl,
         ...(startDate && { startDate: new Date(startDate) }),
         ...(endDate && { endDate: new Date(endDate) }),
         ...rest
@@ -70,7 +98,7 @@ export class CollectionService {
   async findAll(query: CollectionQueryDto): Promise<PaginatedResponseDto<CollectionWithCounts>> {
     const {
       page = 1,
-      limit = 10,
+      limit = Math.min(query.limit || 10, 50), // Enforce max limit
       search,
       year,
       season,
@@ -319,10 +347,6 @@ export class CollectionService {
       const { _count, ...rest } = collection;
       return {
         ...rest,
-        metaTitle: collection.metaTitle,
-        metaDescription: collection.metaDescription,
-        createdAt: collection.createdAt,
-        updatedAt: collection.updatedAt,
         productCount: _count.products
       };
     });
@@ -387,25 +411,26 @@ export class CollectionService {
       const { _count, ...rest } = collection;
       return {
         ...rest,
-        metaTitle: collection.metaTitle,
-        metaDescription: collection.metaDescription,
-        createdAt: collection.createdAt,
-        updatedAt: collection.updatedAt,
         productCount: _count.products
       };
     });
   }
 
   /**
-   * Update collection with conflict checking and date validation
+   * Update collection with image handling, conflict checking and date validation
    * Time Complexity: O(log n) for checks + O(1) for update
    */
-  async update(id: string, updateCollectionDto: UpdateCollectionDto): Promise<Collection> {
+  async update(
+    id: string, 
+    updateCollectionDto: UpdateCollectionDto, 
+    imageFile?: Express.Multer.File,
+    removeImage: boolean = false
+  ): Promise<Collection> {
     if (!id || typeof id !== 'string') {
       throw new BadRequestException('Invalid collection ID');
     }
 
-    const { name, slug: providedSlug, startDate, endDate, ...rest } = updateCollectionDto;
+    const { name, slug: providedSlug, startDate, endDate, imageUrl, ...rest } = updateCollectionDto;
 
     // Validate date range if both dates are provided - O(1)
     if (startDate && endDate && new Date(startDate) >= new Date(endDate)) {
@@ -415,11 +440,33 @@ export class CollectionService {
     // Check if collection exists - O(log n)
     const existingCollection = await this.prisma.collection.findUnique({
       where: { id },
-      select: { id: true, name: true, slug: true }
+      select: { id: true, name: true, slug: true, imageUrl: true }
     });
 
     if (!existingCollection) {
       throw new NotFoundException(`Collection with ID ${id} not found`);
+    }
+
+    // Handle image operations
+    let finalImageUrl = imageUrl;
+    const oldImageUrl = existingCollection.imageUrl;
+
+    if (removeImage) {
+      finalImageUrl = null;
+      // Delete old image if it exists
+      if (oldImageUrl && this.imageUploadService) {
+        await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+      }
+    } else if (imageFile && this.imageUploadService) {
+      try {
+        finalImageUrl = await this.imageUploadService.uploadImage(imageFile, 'collections');
+        // Delete old image after successful upload
+        if (oldImageUrl && oldImageUrl !== finalImageUrl) {
+          await this.imageUploadService.deleteImage(oldImageUrl).catch(() => {});
+        }
+      } catch (error) {
+        throw new BadRequestException(`Image upload failed: ${error.message}`);
+      }
     }
 
     // Handle slug generation
@@ -443,6 +490,11 @@ export class CollectionService {
       });
 
       if (conflicts) {
+        // Rollback image upload if there's a conflict
+        if (finalImageUrl && finalImageUrl !== oldImageUrl && finalImageUrl !== imageUrl && this.imageUploadService) {
+          await this.imageUploadService.deleteImage(finalImageUrl).catch(() => {});
+        }
+        
         if (name && conflicts.name.toLowerCase() === name.toLowerCase()) {
           throw new ConflictException('Collection with this name already exists');
         }
@@ -452,16 +504,20 @@ export class CollectionService {
       }
     }
 
+    // Build update data
+    const updateData: any = { ...rest };
+    if (name) updateData.name = name;
+    if (slug) updateData.slug = slug;
+    if (startDate) updateData.startDate = new Date(startDate);
+    if (endDate) updateData.endDate = new Date(endDate);
+    if (removeImage || finalImageUrl !== undefined) {
+      updateData.imageUrl = finalImageUrl;
+    }
+
     // Single database update with date conversion - O(1)
     return this.prisma.collection.update({
       where: { id },
-      data: {
-        ...(name && { name }),
-        ...(slug && { slug }),
-        ...(startDate && { startDate: new Date(startDate) }),
-        ...(endDate && { endDate: new Date(endDate) }),
-        ...rest
-      }
+      data: updateData
     });
   }
 
@@ -480,6 +536,7 @@ export class CollectionService {
       select: {
         id: true,
         name: true,
+        imageUrl: true,
         _count: {
           select: {
             products: true
@@ -504,6 +561,11 @@ export class CollectionService {
       data: { isActive: false }
     });
 
+    // Optionally delete image (commented out for soft delete)
+    // if (collection.imageUrl && this.imageUploadService) {
+    //   await this.imageUploadService.deleteImage(collection.imageUrl).catch(() => {});
+    // }
+
     return { message: `Collection '${collection.name}' has been successfully deactivated` };
   }
 
@@ -518,16 +580,22 @@ export class CollectionService {
 
     const collection = await this.prisma.collection.findUnique({
       where: { id },
-      select: { name: true }
+      select: { name: true, imageUrl: true }
     });
 
     if (!collection) {
       throw new NotFoundException(`Collection with ID ${id} not found`);
     }
 
+    // Delete the collection
     await this.prisma.collection.delete({
       where: { id }
     });
+
+    // Delete associated image
+    if (collection.imageUrl && this.imageUploadService) {
+      await this.imageUploadService.deleteImage(collection.imageUrl).catch(() => {});
+    }
 
     return { message: `Collection '${collection.name}' has been permanently deleted` };
   }
@@ -539,6 +607,16 @@ export class CollectionService {
   async bulkUpdateSortOrder(updates: Array<{ id: string; sortOrder: number }>): Promise<{ updated: number }> {
     if (!Array.isArray(updates) || updates.length === 0) {
       throw new BadRequestException('Updates array cannot be empty');
+    }
+
+    // Validate input data
+    for (const update of updates) {
+      if (!update.id || typeof update.id !== 'string') {
+        throw new BadRequestException('Invalid collection ID in updates');
+      }
+      if (typeof update.sortOrder !== 'number' || update.sortOrder < 0) {
+        throw new BadRequestException('Sort order must be a non-negative number');
+      }
     }
 
     // Validate all IDs exist before updating - O(log n * k)
