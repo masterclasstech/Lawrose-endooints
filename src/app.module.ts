@@ -13,6 +13,8 @@ import { UsersModule } from './users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { CategoryModule } from './category/category.module';
 import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
+import { ProductsModule } from './products/products.module';
+import { CommonModule } from './common/services/common.module';
 
 @Module({
   imports: [
@@ -199,11 +201,13 @@ import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
     PrismaModule,
     RedisModule,
     CloudinaryModule,
+    CommonModule,
     
     // Feature modules
     AuthModule,
     UsersModule,
     CategoryModule,
+    ProductsModule,
     
     // Add other feature modules here as needed
   ],

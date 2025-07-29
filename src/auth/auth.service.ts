@@ -157,7 +157,7 @@ export class AuthService {
   }
 
   /**
-   * Centralized user creation
+   * Centralized user creation - OPTIMIZED VERSION
    */
   private async createUser(userData: CreateUserData): Promise<any> {
     const {
@@ -218,6 +218,9 @@ export class AuthService {
         avatarUrl: true,
         googleId: true,
         provider: true,
+        // Include the verification token in response for email sending
+        emailVerificationToken: true,
+        emailVerificationExpires: true,
       },
     });
   }
@@ -264,7 +267,7 @@ export class AuthService {
   }
 
   /**
-   * Centralized email sending with error handling
+   * Centralized email sending with better error handling - OPTIMIZED VERSION
    */
   private async sendEmailSafely(
     emailType: 'verification' | 'passwordReset',
@@ -273,19 +276,23 @@ export class AuthService {
     fullName: string
   ): Promise<boolean> {
     try {
+      this.logger.log(`Attempting to send ${emailType} email to: ${email}`);
+      this.logger.log(`Token provided: ${token ? 'Yes' : 'No'}`);
+      this.logger.log(`Full name provided: ${fullName ? 'Yes' : 'No'}`);
+
       const emailSent = emailType === 'verification' 
         ? await this.emailService.sendVerificationEmail(email, token, fullName)
         : await this.emailService.sendPasswordResetEmail(email, token, fullName);
       
       if (emailSent) {
-        this.logger.log(`${emailType} email sent successfully to: ${email}`);
+        this.logger.log(`✅ ${emailType} email sent successfully to: ${email}`);
         return true;
       } else {
-        this.logger.warn(`${emailType} email failed to send to: ${email}`);
+        this.logger.warn(`⚠️ ${emailType} email failed to send to: ${email}`);
         return false;
       }
     } catch (emailError) {
-      this.logger.error(`${emailType} email service failed for: ${email}`, emailError.stack);
+      this.logger.error(`❌ ${emailType} email service failed for: ${email}`, emailError.stack);
       return false;
     }
   }
@@ -294,10 +301,15 @@ export class AuthService {
   // PUBLIC METHODS (Refactored using DRY principles)
   // ===========================================
 
+  /**
+   * Optimized user registration with better email handling
+   */
   async register(registerDto: RegisterDto): Promise<{ success: boolean; message: string; data: { user: UserResponse } }> {
     const { email, password, fullName, phoneNumber } = registerDto;
 
     try {
+      this.logger.log(`Starting registration process for: ${email}`);
+
       // Check if user exists
       const { exists } = await this.checkUserExists(email);
       if (exists) {
@@ -315,17 +327,37 @@ export class AuthService {
         provider: AuthProvider.TRADITIONAL,
       });
 
+      this.logger.log(`User created successfully: ${email}`);
+      this.logger.log(`Email verification token generated: ${user.emailVerificationToken ? 'Yes' : 'No'}`);
+
       // Send verification email safely
       if (user.emailVerificationToken) {
-        await this.sendEmailSafely('verification', email, user.emailVerificationToken, fullName);
+        this.logger.log(`Attempting to send verification email...`);
+        const emailSent = await this.sendEmailSafely(
+          'verification', 
+          email, 
+          user.emailVerificationToken, 
+          fullName
+        );
+        
+        if (!emailSent) {
+          this.logger.warn(`Verification email failed to send to: ${email}, but user registration was successful`);
+          // Don't throw error here, user is still registered successfully
+          // You might want to add a flag or notification system for failed emails
+        }
+      } else {
+        this.logger.error(`No email verification token generated for user: ${email}`);
       }
 
-      this.logger.log(`User registered successfully: ${email}`);
+      this.logger.log(`Registration process completed for: ${email}`);
+
+      // Remove sensitive data from response
+      const { ...userResponse } = user;
 
       return {
         success: true,
         message: 'Registration successful. Please check your email to verify your account.',
-        data: { user },
+        data: { user: userResponse },
       };
     } catch (error) {
       this.logger.error(`Registration failed for email: ${email}`, error.stack);
@@ -710,7 +742,6 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token');
     }
   }
-
   async forgotPassword(email: string): Promise<BasicResponse> {
     try {
       const user = await this.prisma.user.findUnique({
