@@ -256,7 +256,9 @@ model Product {
   
   // Media
   images        String[] // Array of Cloudinary URLs
+  imagePublicIds String[] // Array of Cloudinary public IDs for cleanup
   featuredImage String?  // Main product image
+  featuredImagePublicId String? // Featured image public ID for cleanup
   
   // SEO
   metaTitle       String?

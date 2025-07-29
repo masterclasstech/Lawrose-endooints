@@ -37,7 +37,7 @@ export class CreateCategoryDto {
         type: 'string',
         format: 'binary'
     })
-    imageFile?: any;
+    imageFiles?: any;
 
     @ApiPropertyOptional({
         description: 'Category image URL (alternative to file upload)',
