@@ -61,4 +61,10 @@ export class CreateVariantDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean = true;
+
+  // Add the missing imageFiles property
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  imageFiles?: Buffer[] | string[];
 }

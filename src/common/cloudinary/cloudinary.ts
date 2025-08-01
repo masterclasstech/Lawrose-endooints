@@ -21,6 +21,11 @@ interface CloudinaryDeleteResult {
   public_id?: string;
 }
 
+interface UploadResult {
+  url: string;
+  public_id: string;
+}
+
 @Injectable()
 export class CloudinaryService {
   constructor(private configService: ConfigService) {
@@ -77,7 +82,59 @@ export class CloudinaryService {
   }
 
   /**
-   * Upload multiple images to Cloudinary
+   * Upload multiple images to Cloudinary - ADDED MISSING METHOD
+   * @param files Array of Buffers or file paths
+   * @param folder Folder name for organization
+   * @param options Upload options
+   * @returns Promise<UploadResult[]> - Array of upload results
+   */
+  async uploadMultiple(
+    files: (Buffer | string)[],
+    folder: string = 'variants',
+    options: CloudinaryUploadOptions = {}
+  ): Promise<UploadResult[]> {
+    try {
+      const uploadPromises = files.map(async (file, index) => {
+        const uploadOptions = {
+          ...options,
+          folder: `lawrose/${folder}`,
+          public_id: options.public_id ? `${options.public_id}_${index}` : undefined,
+        };
+
+        const result: UploadApiResponse = await new Promise((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            uploadOptions,
+            (error: UploadApiErrorResponse | undefined, result: UploadApiResponse | undefined) => {
+              if (error) reject(error);
+              else if (result) resolve(result);
+              else reject(new Error('Upload failed'));
+            }
+          );
+
+          if (Buffer.isBuffer(file)) {
+            uploadStream.end(file);
+          } else {
+            // If file is a path string
+            cloudinary.uploader.upload(file, uploadOptions)
+              .then(resolve)
+              .catch(reject);
+          }
+        });
+
+        return {
+          url: result.secure_url,
+          public_id: result.public_id,
+        };
+      });
+
+      return await Promise.all(uploadPromises);
+    } catch (error) {
+      throw new BadRequestException(`Multiple image upload failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Upload multiple images to Cloudinary (alternative method name for backwards compatibility)
    * @param files Array of Buffers or file paths
    * @param options Upload options
    * @returns Promise<string[]> - Array of Cloudinary URLs
@@ -87,14 +144,8 @@ export class CloudinaryService {
     options: CloudinaryUploadOptions = {}
   ): Promise<string[]> {
     try {
-      const uploadPromises = files.map((file, index) => 
-        this.uploadImage(file, {
-          ...options,
-          public_id: options.public_id ? `${options.public_id}_${index}` : undefined,
-        })
-      );
-
-      return await Promise.all(uploadPromises);
+      const results = await this.uploadMultiple(files, 'images', options);
+      return results.map(result => result.url);
     } catch (error) {
       throw new BadRequestException(`Multiple image upload failed: ${error.message}`);
     }
@@ -115,7 +166,25 @@ export class CloudinaryService {
   }
 
   /**
-   * Delete multiple images from Cloudinary
+   * Delete multiple images from Cloudinary - ADDED MISSING METHOD
+   * @param urls Array of Cloudinary URLs to delete
+   * @returns Promise<CloudinaryDeleteResult[]>
+   */
+  async deleteMultiple(urls: string[]): Promise<CloudinaryDeleteResult[]> {
+    try {
+      const deletePromises = urls.map(async (url) => {
+        const publicId = this.extractPublicId(url);
+        return await this.deleteImage(publicId);
+      });
+      
+      return await Promise.all(deletePromises);
+    } catch (error) {
+      throw new BadRequestException(`Multiple image deletion failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete multiple images from Cloudinary by public IDs
    * @param publicIds Array of public IDs to delete
    * @returns Promise<CloudinaryDeleteResult[]>
    */

@@ -1,15 +1,15 @@
 /* eslint-disable prettier/prettier */
 
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
-import { ProductRepository } from './repositories/product.repository';
-import { ProductVariantRepository } from './repositories/product-variant.repository';
-import { CloudinaryService } from '../common/cloudinary/cloudinary';
+import { ProductRepository } from '../repositories/product.repository';
+import { ProductVariantRepository } from '../repositories/product-variant.repository';
+import { CloudinaryService } from '../../common/cloudinary/cloudinary';
 import { CacheService } from '@/common/services/cache.service';
-import { CreateProductDto } from './dto/create-product.dto';
-import { UpdateProductDto } from './dto/update-product.dto';
-import { ProductQueryDto } from './dto/product-query.dto';
+import { CreateProductDto } from '../../products/dto/create-product.dto';
+import { UpdateProductDto } from '../../products/dto/update-product.dto';
+import { ProductQueryDto } from '../../products/dto/product-query.dto';
 import { generateUniqueSlug, createSlugChecker } from '@/common/utils/slug.util';
-import { CacheKeyType } from '../interfaces/cache.interface';
+import { CacheKeyType } from '../../interfaces/cache.interface';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Gender, Prisma } from '@prisma/client'; // Import Gender enum and Prisma types
 
