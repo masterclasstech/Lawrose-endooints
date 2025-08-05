@@ -1,6 +1,6 @@
 /* eslint-disable prettier/prettier */
 
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, Logger } from '@nestjs/common';
 import { ProductRepository } from '../repositories/product.repository';
 import { ProductVariantRepository } from '../repositories/product-variant.repository';
 import { CloudinaryService } from '../../common/cloudinary/cloudinary';
@@ -32,6 +32,8 @@ export class ProductService {
     FILTERS: 7200,        // 2 hours
     INVENTORY_STATS: 300, // 5 minutes
   };
+
+  private readonly logger = new Logger(ProductService.name);
 
   constructor(
     private readonly productRepository: ProductRepository,
@@ -115,27 +117,34 @@ export class ProductService {
   }
 
   async findById(id: string) {
-    // Try cache first
+    let product = null;
     const cacheKey = {
       type: CacheKeyType.PRODUCT_DATA,
       identifier: 'detail',
       subKey: id,
     };
-
-    let product = await this.cacheService.get(cacheKey);
+    try {
+      product = await this.cacheService.get(cacheKey);
+    } catch (error) {
+      this.logger.warn(`Cache get failed for product ${id}: ${error.message}`);
+    }
     
     if (!product) {
       product = await this.productRepository.findById(id);
       if (!product) {
         throw new NotFoundException('Product not found');
       }
-
-      // Cache the product
-      await this.cacheService.set(cacheKey, product, { ttl: this.CACHE_TTL.PRODUCT_DETAIL });
+      
+      // Try to cache, but don't fail if caching fails
+      try {
+        await this.cacheService.set(cacheKey, product, { ttl: this.CACHE_TTL.PRODUCT_DETAIL });
+      } catch (error) {
+        this.logger.warn(`Cache set failed for product ${id}: ${error.message}`);
+      }
     }
-
+    
     return this.enrichProductData(product);
-  }
+}
 
   async findBySlug(slug: string) {
     // Try cache first
@@ -165,6 +174,7 @@ export class ProductService {
 
     return this.enrichProductData(typedProduct);
   }
+
 
   async findMany(query: ProductQueryDto) {
     // Generate cache key based on query parameters

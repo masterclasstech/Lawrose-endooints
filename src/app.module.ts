@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { MulterModule } from '@nestjs/platform-express';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { memoryStorage } from 'multer';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -56,6 +57,24 @@ import { CommonModule } from './common/services/common.module';
         logger.log('All required environment variables are present');
         return config;
       },
+    }),
+
+    // Global Event Emitter configuration
+    EventEmitterModule.forRoot({
+      // Set this to `true` to use wildcards (useful for pattern matching)
+      wildcard: true,
+      // The delimiter used to segment namespaces
+      delimiter: '.',
+      // Set this to `true` if you want to emit the newListener event
+      newListener: false,
+      // Set this to `true` if you want to emit the removeListener event
+      removeListener: false,
+      // The maximum amount of listeners that can be assigned to an event
+      maxListeners: 20,
+      // Show event name in memory leak message when more than maximum amount of listeners are assigned
+      verboseMemoryLeak: false,
+      // Disable throwing uncaughtException if an error event is emitted and it has no listeners
+      ignoreErrors: false,
     }),
 
     // Global Multer configuration for image uploads
