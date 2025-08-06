@@ -16,6 +16,7 @@ import { CategoryModule } from './category/category.module';
 import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
 import { ProductsModule } from './products/products.module';
 import { CommonModule } from './common/services/common.module';
+import { CartModule } from './cart/cart.module';
 
 @Module({
   imports: [
@@ -227,6 +228,7 @@ import { CommonModule } from './common/services/common.module';
     UsersModule,
     CategoryModule,
     ProductsModule,
+    CartModule,
     
     // Add other feature modules here as needed
   ],
