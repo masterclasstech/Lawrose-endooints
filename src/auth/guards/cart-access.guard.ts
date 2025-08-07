@@ -3,15 +3,26 @@ import {
     Injectable,
     CanActivate,
     ExecutionContext,
-    //UnauthorizedException,
     BadRequestException,
 } from '@nestjs/common';
 import { Request } from 'express';
 
+// Define the User interface for type safety
+interface AuthenticatedUser {
+    id: string;
+    email?: string;
+    role?: string;
+}
+
+// Extend Express Request to include user property
+interface RequestWithUser extends Request {
+    user?: AuthenticatedUser;
+}
+
 @Injectable()
 export class CartAccessGuard implements CanActivate {
     canActivate(context: ExecutionContext): boolean {
-        const request = context.switchToHttp().getRequest<Request>();
+        const request = context.switchToHttp().getRequest<RequestWithUser>();
         const user = request.user;
         const guestId = request.headers['x-guest-id'] as string;
 

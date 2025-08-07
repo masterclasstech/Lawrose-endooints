@@ -18,6 +18,14 @@ import { UpdateCartItemDto } from '../cart/dto/update-cart-item.dto';
 import { CART_CONSTANTS, CART_ERROR_MESSAGES } from '../cart/constant/cart.constants';
 import { Size } from '@prisma/client';
 
+// Define the User interface for type safety
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+interface AuthenticatedUser {
+    id: string;
+    email?: string;
+    role?: string;
+}
+
 @Injectable()
 export class CartService {
     private readonly logger = new Logger(CartService.name);
@@ -28,34 +36,22 @@ export class CartService {
     ) {}
 
     // ===============================
-    // SESSION-BASED CART METHODS
+    // UNIFIED CART METHODS (SUPPORTS BOTH AUTHENTICATED AND GUEST USERS)
     // ===============================
 
     /**
-     * Get cart by session ID (works for both authenticated and unauthenticated users)
-     * Time Complexity: O(1) from cache
+     * Get cart by identifier (works for both authenticated and unauthenticated users)
+     * Time Complexity: O(1) from cache for session carts, O(n) for user carts from DB
      */
-    async getCart(sessionId: string): Promise<CartInterface> {
-        const cacheKey = this.generateCacheKey(sessionId);
-
+    async getCart(identifier: string, userId?: string): Promise<CartInterface> {
         try {
-            let cart = await this.cache.get<CartInterface>(cacheKey);
-            
-            if (!cart) {
-                // Initialize empty cart
-                cart = {
-                    sessionId,
-                    items: [],
-                    summary: this.createEmptyCartSummary(),
-                    lastModified: new Date(),
-                };
-
-                await this.cache.set(cacheKey, cart, {
-                    ttl: CART_CONSTANTS.CACHE_TTL.GUEST_CART,
-                });
+            // For authenticated users, prioritize database cart
+            if (userId) {
+                return await this.getUserCartFromDatabase(identifier, userId);
             }
 
-            return cart;
+            // For guest users, use session-based cache
+            return await this.getSessionCart(identifier);
         } catch (error) {
             this.logger.error(`Failed to get cart: ${error.message}`, error.stack);
             throw error;
@@ -63,10 +59,14 @@ export class CartService {
     }
 
     /**
-     * Add item to cart
+     * Add item to cart (unified for both user types)
      * Time Complexity: O(1) for most cases, O(n) worst case if no variant match
      */
-    async addToCart(sessionId: string, addToCartDto: AddToCartDto): Promise<CartInterface> {
+    async addToCart(
+        identifier: string, 
+        addToCartDto: AddToCartDto, 
+        userId?: string
+    ): Promise<CartInterface> {
         const { productId, variantId, quantity, selectedColor, selectedSize } = addToCartDto;
 
         try {
@@ -83,7 +83,7 @@ export class CartService {
             }
 
             // Get current cart
-            const currentCart = await this.getCart(sessionId);
+            const currentCart = await this.getCart(identifier, userId);
             
             // Check cart limits
             if (currentCart.items.length >= CART_CONSTANTS.LIMITS.MAX_ITEMS) {
@@ -105,17 +105,18 @@ export class CartService {
                     throw new BadRequestException(CART_ERROR_MESSAGES.QUANTITY_LIMIT_EXCEEDED);
                 }
                 
-                return await this.updateCartItemQuantity(sessionId, existingItem.id, newQuantity);
+                return await this.updateCartItem(identifier, existingItem.id, { quantity: newQuantity }, userId);
             } else {
                 // Add new item
                 const newItem = this.createCartItemFromProduct(product, variant, addToCartDto);
-                currentCart.items.push(newItem);
                 
-                // Recalculate totals and update cache
-                const updatedCart = this.calculateCartTotals(currentCart);
-                await this.updateCartCache(sessionId, updatedCart);
-                
-                return updatedCart;
+                if (userId) {
+                    // For authenticated users, save to database
+                    return await this.addItemToUserCart(identifier, newItem, userId);
+                } else {
+                    // For guest users, save to cache
+                    return await this.addItemToSessionCart(identifier, newItem);
+                }
             }
         } catch (error) {
             this.logger.error(`Failed to add to cart: ${error.message}`, error.stack);
@@ -124,22 +125,32 @@ export class CartService {
     }
 
     /**
-     * Update cart item quantity
+     * Update cart item quantity (unified for both user types)
      * Time Complexity: O(1) for update, O(n) for recalculation
      */
     async updateCartItem(
-        sessionId: string,
+        identifier: string,
         itemId: string,
-        updateDto: UpdateCartItemDto
+        updateDto: UpdateCartItemDto,
+        userId?: string
     ): Promise<CartInterface> {
         const { quantity } = updateDto;
 
         try {
-            const currentCart = await this.getCart(sessionId);
+            const currentCart = await this.getCart(identifier, userId);
             const cartItem = currentCart.items.find(item => item.id === itemId);
 
             if (!cartItem) {
                 throw new NotFoundException(CART_ERROR_MESSAGES.ITEM_NOT_FOUND);
+            }
+
+            // Validate quantity limits
+            if (quantity > CART_CONSTANTS.LIMITS.MAX_QUANTITY_PER_ITEM) {
+                throw new BadRequestException(CART_ERROR_MESSAGES.QUANTITY_LIMIT_EXCEEDED);
+            }
+
+            if (quantity <= 0) {
+                throw new BadRequestException('Quantity must be greater than 0');
             }
 
             // Validate stock availability
@@ -153,7 +164,13 @@ export class CartService {
                 throw new BadRequestException(CART_ERROR_MESSAGES.INSUFFICIENT_STOCK);
             }
 
-            return await this.updateCartItemQuantity(sessionId, itemId, quantity);
+            if (userId) {
+                // Update in database for authenticated users
+                return await this.updateUserCartItem(identifier, itemId, quantity, userId);
+            } else {
+                // Update in cache for guest users
+                return await this.updateSessionCartItem(identifier, itemId, quantity);
+            }
         } catch (error) {
             this.logger.error(`Failed to update cart item: ${error.message}`, error.stack);
             throw error;
@@ -161,24 +178,25 @@ export class CartService {
     }
 
     /**
-     * Remove item from cart
+     * Remove item from cart (unified for both user types)
      * Time Complexity: O(n) for finding item, O(n) for recalculation
      */
-    async removeCartItem(sessionId: string, itemId: string): Promise<CartInterface> {
+    async removeCartItem(identifier: string, itemId: string, userId?: string): Promise<CartInterface> {
         try {
-            const currentCart = await this.getCart(sessionId);
-            const itemIndex = currentCart.items.findIndex(item => item.id === itemId);
+            const currentCart = await this.getCart(identifier, userId);
+            const itemExists = currentCart.items.some(item => item.id === itemId);
 
-            if (itemIndex === -1) {
+            if (!itemExists) {
                 throw new NotFoundException(CART_ERROR_MESSAGES.ITEM_NOT_FOUND);
             }
 
-            // Remove item and recalculate
-            currentCart.items.splice(itemIndex, 1);
-            const updatedCart = this.calculateCartTotals(currentCart);
-            await this.updateCartCache(sessionId, updatedCart);
-            
-            return updatedCart;
+            if (userId) {
+                // Remove from database for authenticated users
+                return await this.removeUserCartItem(identifier, itemId, userId);
+            } else {
+                // Remove from cache for guest users
+                return await this.removeSessionCartItem(identifier, itemId);
+            }
         } catch (error) {
             this.logger.error(`Failed to remove cart item: ${error.message}`, error.stack);
             throw error;
@@ -186,13 +204,20 @@ export class CartService {
     }
 
     /**
-     * Clear entire cart
-     * Time Complexity: O(1)
+     * Clear entire cart (unified for both user types)
+     * Time Complexity: O(1) for cache, O(n) for database
      */
-    async clearCart(sessionId: string): Promise<void> {
+    async clearCart(identifier: string, userId?: string): Promise<void> {
         try {
-            await this.clearCartCache(sessionId);
-            this.logger.log(`Cart cleared for session: ${sessionId}`);
+            if (userId) {
+                // Clear from database for authenticated users
+                await this.clearUserCart(userId);
+            } else {
+                // Clear from cache for guest users
+                await this.clearCartCache(identifier);
+            }
+            
+            this.logger.log(`Cart cleared for identifier: ${identifier}`);
         } catch (error) {
             this.logger.error(`Failed to clear cart: ${error.message}`, error.stack);
             throw error;
@@ -200,12 +225,12 @@ export class CartService {
     }
 
     /**
-     * Get cart item count
-     * Time Complexity: O(1) from cache
+     * Get cart item count (unified for both user types)
+     * Time Complexity: O(1) from cache or summary
      */
-    async getCartItemCount(sessionId: string): Promise<number> {
+    async getCartItemCount(identifier: string, userId?: string): Promise<number> {
         try {
-            const cart = await this.getCart(sessionId);
+            const cart = await this.getCart(identifier, userId);
             return cart.summary.itemCount;
         } catch (error) {
             this.logger.error(`Failed to get cart item count: ${error.message}`);
@@ -214,27 +239,21 @@ export class CartService {
     }
 
     // ===============================
-    // CHECKOUT & PERSISTENCE (AUTHENTICATION REQUIRED)
+    // AUTHENTICATION-SPECIFIC METHODS
     // ===============================
 
     /**
-     * Persist cart to database when user authenticates
+     * Merge session cart with user cart after authentication
      * This transfers the session cart to user's permanent cart
      * Time Complexity: O(n) where n = cart items
      */
-    async persistCartForUser(sessionId: string, userId: string): Promise<CartInterface> {
+    async mergeSessionCartWithUserCart(sessionId: string, userId: string): Promise<CartInterface> {
         try {
-            const sessionCart = await this.getCart(sessionId);
+            const sessionCart = await this.getSessionCart(sessionId);
             
             if (sessionCart.items.length === 0) {
-                // No items to persist, return empty user cart
-                return {
-                    sessionId,
-                    userId,
-                    items: [],
-                    summary: this.createEmptyCartSummary(),
-                    lastModified: new Date(),
-                };
+                // No items to merge, return user's existing cart
+                return await this.getUserCartFromDatabase(`user_${userId}`, userId);
             }
 
             // Get existing user cart from database (if any)
@@ -327,16 +346,16 @@ export class CartService {
             // Execute all merge operations
             await Promise.all(mergeOperations);
 
-            // Build the persisted cart
-            const persistedCart = await this.buildUserCartFromDb(userId, sessionId);
+            // Clear session cart after successful merge
+            await this.clearCartCache(sessionId);
+
+            // Return the merged user cart
+            const mergedCart = await this.getUserCartFromDatabase(`user_${userId}`, userId);
             
-            // Update cache with persisted cart
-            await this.updateCartCache(sessionId, persistedCart);
-            
-            this.logger.log(`Persisted session cart ${sessionId} for user ${userId}`);
-            return persistedCart;
+            this.logger.log(`Merged session cart ${sessionId} with user cart ${userId}`);
+            return mergedCart;
         } catch (error) {
-            this.logger.error(`Failed to persist cart: ${error.message}`, error.stack);
+            this.logger.error(`Failed to merge cart: ${error.message}`, error.stack);
             throw error;
         }
     }
@@ -345,26 +364,17 @@ export class CartService {
      * Validate cart before checkout - REQUIRES AUTHENTICATION
      * Time Complexity: O(n) where n = cart items
      */
-    async validateCartForCheckout(sessionId: string, userId?: string): Promise<{
+    async validateCartForCheckout(identifier: string, userId: string): Promise<{
         isValid: boolean;
         errors: string[];
         warnings: string[];
         requiresAuthentication?: boolean;
     }> {
-        if (!userId) {
-            return {
-                isValid: false,
-                errors: ['Authentication required for checkout'],
-                warnings: [],
-                requiresAuthentication: true,
-            };
-        }
-
         const errors: string[] = [];
         const warnings: string[] = [];
 
         try {
-            const cart = await this.getCart(sessionId);
+            const cart = await this.getCart(identifier, userId);
 
             if (cart.items.length === 0) {
                 errors.push('Cart is empty');
@@ -436,18 +446,52 @@ export class CartService {
     }
 
     // ===============================
-    // PRIVATE HELPER METHODS
+    // PRIVATE HELPER METHODS - SESSION CART MANAGEMENT
     // ===============================
 
     /**
-     * Update cart item quantity in cache
+     * Get session-based cart from cache
      */
-    private async updateCartItemQuantity(
-        sessionId: string,
-        itemId: string,
-        quantity: number
-    ): Promise<CartInterface> {
-        const currentCart = await this.getCart(sessionId);
+    private async getSessionCart(identifier: string): Promise<CartInterface> {
+        const cacheKey = this.generateCacheKey(identifier);
+
+        let cart = await this.cache.get<CartInterface>(cacheKey);
+        
+        if (!cart) {
+            // Initialize empty cart
+            cart = {
+                sessionId: identifier,
+                items: [],
+                summary: this.createEmptyCartSummary(),
+                lastModified: new Date(),
+            };
+
+            await this.cache.set(cacheKey, cart, {
+                ttl: CART_CONSTANTS.CACHE_TTL.GUEST_CART,
+            });
+        }
+
+        return cart;
+    }
+
+    /**
+     * Add item to session cart
+     */
+    private async addItemToSessionCart(identifier: string, newItem: CartItemInterface): Promise<CartInterface> {
+        const currentCart = await this.getSessionCart(identifier);
+        currentCart.items.push(newItem);
+        
+        const updatedCart = this.calculateCartTotals(currentCart);
+        await this.updateCartCache(identifier, updatedCart);
+        
+        return updatedCart;
+    }
+
+    /**
+     * Update session cart item quantity
+     */
+    private async updateSessionCartItem(identifier: string, itemId: string, quantity: number): Promise<CartInterface> {
+        const currentCart = await this.getSessionCart(identifier);
         const itemIndex = currentCart.items.findIndex(item => item.id === itemId);
         
         if (itemIndex === -1) {
@@ -460,16 +504,38 @@ export class CartService {
         
         // Recalculate totals and update cache
         const updatedCart = this.calculateCartTotals(currentCart);
-        await this.updateCartCache(sessionId, updatedCart);
+        await this.updateCartCache(identifier, updatedCart);
         
         return updatedCart;
     }
 
     /**
-     * Build user cart from database for authenticated users
-     * Time Complexity: O(n) where n = cart items
+     * Remove item from session cart
      */
-    private async buildUserCartFromDb(userId: string, sessionId: string): Promise<CartInterface> {
+    private async removeSessionCartItem(identifier: string, itemId: string): Promise<CartInterface> {
+        const currentCart = await this.getSessionCart(identifier);
+        const itemIndex = currentCart.items.findIndex(item => item.id === itemId);
+
+        if (itemIndex === -1) {
+            throw new NotFoundException(CART_ERROR_MESSAGES.ITEM_NOT_FOUND);
+        }
+
+        // Remove item and recalculate
+        currentCart.items.splice(itemIndex, 1);
+        const updatedCart = this.calculateCartTotals(currentCart);
+        await this.updateCartCache(identifier, updatedCart);
+        
+        return updatedCart;
+    }
+
+    // ===============================
+    // PRIVATE HELPER METHODS - USER CART MANAGEMENT
+    // ===============================
+
+    /**
+     * Get authenticated user cart from database
+     */
+    private async getUserCartFromDatabase(identifier: string, userId: string): Promise<CartInterface> {
         // Get cart items from database
         const cartItems = await this.prisma.cartItem.findMany({
             where: { userId },
@@ -518,7 +584,7 @@ export class CartService {
 
         // Create cart and calculate totals
         const cart: CartInterface = {
-            sessionId,
+            sessionId: identifier,
             userId,
             items,
             summary: this.createEmptyCartSummary(),
@@ -527,6 +593,87 @@ export class CartService {
 
         return this.calculateCartTotals(cart);
     }
+
+    /**
+     * Add item to user cart in database
+     */
+    private async addItemToUserCart(identifier: string, newItem: CartItemInterface, userId: string): Promise<CartInterface> {
+        // Create in database
+        await this.prisma.cartItem.create({
+            data: {
+                userId,
+                productId: newItem.productId,
+                variantId: newItem.variantId,
+                quantity: newItem.quantity,
+                selectedColor: newItem.selectedColor,
+                selectedSize: newItem.selectedSize,
+                unitPrice: newItem.unitPrice,
+                totalPrice: newItem.totalPrice,
+            },
+        });
+
+        // Return updated cart from database
+        return await this.getUserCartFromDatabase(identifier, userId);
+    }
+
+    /**
+     * Update user cart item in database
+     */
+    private async updateUserCartItem(identifier: string, itemId: string, quantity: number, userId: string): Promise<CartInterface> {
+        // Find the cart item
+        const cartItem = await this.prisma.cartItem.findFirst({
+            where: { 
+                id: itemId, 
+                userId 
+            },
+        });
+
+        if (!cartItem) {
+            throw new NotFoundException(CART_ERROR_MESSAGES.ITEM_NOT_FOUND);
+        }
+
+        // Update in database
+        await this.prisma.cartItem.update({
+            where: { id: itemId },
+            data: {
+                quantity,
+                totalPrice: quantity * cartItem.unitPrice,
+                updatedAt: new Date(),
+            },
+        });
+
+        // Return updated cart from database
+        return await this.getUserCartFromDatabase(identifier, userId);
+    }
+
+    /**
+     * Remove item from user cart in database
+     */
+    private async removeUserCartItem(identifier: string, itemId: string, userId: string): Promise<CartInterface> {
+        // Delete from database
+        await this.prisma.cartItem.deleteMany({
+            where: { 
+                id: itemId, 
+                userId 
+            },
+        });
+
+        // Return updated cart from database
+        return await this.getUserCartFromDatabase(identifier, userId);
+    }
+
+    /**
+     * Clear user cart from database
+     */
+    private async clearUserCart(userId: string): Promise<void> {
+        await this.prisma.cartItem.deleteMany({
+            where: { userId },
+        });
+    }
+
+    // ===============================
+    // PRIVATE HELPER METHODS - SHARED UTILITIES
+    // ===============================
 
     /**
      * Calculate cart totals automatically
@@ -583,18 +730,18 @@ export class CartService {
     /**
      * Generate cache key for cart
      */
-    private generateCacheKey(sessionId: string): any {
+    private generateCacheKey(identifier: string): any {
         return {
             type: CacheKeyType.CART_DATA,
-            identifier: sessionId,
+            identifier,
         };
     }
 
     /**
      * Update cart cache
      */
-    private async updateCartCache(sessionId: string, cart: CartInterface): Promise<void> {
-        const cacheKey = this.generateCacheKey(sessionId);
+    private async updateCartCache(identifier: string, cart: CartInterface): Promise<void> {
+        const cacheKey = this.generateCacheKey(identifier);
         await this.cache.set(cacheKey, cart, { 
             ttl: CART_CONSTANTS.CACHE_TTL.GUEST_CART 
         });
@@ -603,8 +750,8 @@ export class CartService {
     /**
      * Clear cart cache
      */
-    private async clearCartCache(sessionId: string): Promise<void> {
-        const cacheKey = this.generateCacheKey(sessionId);
+    private async clearCartCache(identifier: string): Promise<void> {
+        const cacheKey = this.generateCacheKey(identifier);
         await this.cache.del(cacheKey);
     }
 
