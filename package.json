@@ -19,7 +19,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "postinstall": "prisma generate",
+    "postinstall": "prisma generate --schema=src/prisma/schema.prisma",
     "clean": "rimraf dist",
     "clean:cache": "rimraf dist *.tsbuildinfo tsconfig.tsbuildinfo",
     "dev": "npm run clean:cache && nest start --watch",
@@ -112,7 +112,7 @@
     "yup": "^1.2.0"
   },
   "devDependencies": {
-    "@nestjs/cli": "^10.0.0",
+    "@nestjs/cli": "^10.4.9",
     "@nestjs/schematics": "^10.0.0",
     "@nestjs/testing": "^10.4.19",
     "@types/bcrypt": "^5.0.0",
