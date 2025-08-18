@@ -70,7 +70,7 @@ COPY package*.json ./
 COPY src/prisma ./prisma/
 
 # Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
