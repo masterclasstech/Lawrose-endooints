@@ -69,8 +69,9 @@ COPY package*.json ./
 # Copy Prisma schema from src directory (needed before npm install)
 COPY src/prisma ./prisma/
 
-# Install only production dependencies
-RUN npm ci --omit=dev && npm cache clean --force
+# Install only production dependencies (FIXED LINE)
+ENV NODE_ENV=production
+RUN npm ci && npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
