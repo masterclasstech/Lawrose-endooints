@@ -21,10 +21,10 @@ COPY package*.json ./
 COPY src/ ./src/
 
 # Configure npm for better network handling and install dependencies
-RUN npm config set fetch-timeout 300000 && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set fetch-retries 5 && \
+RUN npm config set fetch-timeout 600000 && \
+    npm config set fetch-retry-mintimeout 10000 && \
+    npm config set fetch-retry-maxtimeout 60000 && \
+    npm config set fetch-retries 3 && \
     npm ci
 
 # Development stage
@@ -75,11 +75,11 @@ COPY src/ ./src/
 
 # Configure npm and install only production dependencies
 ENV NODE_ENV=production
-RUN npm config set fetch-timeout 300000 && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set fetch-retries 5 && \
-    npm ci --only=production && \
+RUN npm config set fetch-timeout 600000 && \
+    npm config set fetch-retry-mintimeout 10000 && \
+    npm config set fetch-retry-maxtimeout 60000 && \
+    npm config set fetch-retries 3 && \
+    npm ci --omit=dev && \
     npm cache clean --force
 
 # Copy built application from builder stage
