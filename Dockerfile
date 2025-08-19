@@ -17,11 +17,15 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Copy Prisma schema BEFORE npm install (needed for postinstall script)
-COPY src/prisma ./prisma/
+# Copy the entire src directory to maintain the correct structure
+COPY src/ ./src/
 
-# Install all dependencies (including dev dependencies for build)
-RUN npm ci
+# Configure npm for better network handling and install dependencies
+RUN npm config set fetch-timeout 300000 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    npm ci
 
 # Development stage
 FROM base AS development
@@ -29,7 +33,7 @@ FROM base AS development
 # Set development environment
 ENV NODE_ENV=development
 
-# Copy source code
+# Copy remaining source code (if any additional files exist)
 COPY . .
 
 # Expose port
@@ -41,7 +45,7 @@ CMD ["npm", "run", "start:dev"]
 # Builder stage for production
 FROM base AS builder
 
-# Copy source code
+# Copy remaining source code
 COPY . .
 
 # Build the application
@@ -66,21 +70,26 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Copy Prisma schema from src directory (needed before npm install)
-COPY src/prisma ./prisma/
+# Copy the entire src directory to maintain correct structure for Prisma
+COPY src/ ./src/
 
-# Install only production dependencies (FIXED LINE)
+# Configure npm and install only production dependencies
 ENV NODE_ENV=production
-RUN npm ci && npm cache clean --force
+RUN npm config set fetch-timeout 300000 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    npm ci --only=production && \
+    npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Copy Prisma client from builder
+# Copy Prisma client from builder (ensure the path is correct)
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 
 # Verify files are copied correctly
-RUN ls -la dist/ && ls -la node_modules/.prisma/
+RUN ls -la dist/ && ls -la src/prisma/ && ls -la node_modules/.prisma/
 
 # Create non-root user
 RUN groupadd -r nodejs && useradd -r -g nodejs nestjs
